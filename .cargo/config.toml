@@ -1,0 +1,21 @@
+[build]
+target = "avr-none"
+
+[target.avr-none]
+rustflags = [
+    "-C", "target-cpu=at90can128",
+    "-C", "linker=avr-gcc",
+    "-C", "link-arg=-mmcu=at90can128",
+]
+
+# JTAG
+#runner = ["bash", "-c", "avr-objcopy -O ihex -R .eeprom $0 ${0%.elf}.hex && avrdude -p c128 -c jtag3 -B 100kHz -U flash:w:${0%.elf}.hex"]
+# ISP
+runner = ["bash", "-c", "avr-objcopy -O ihex -R .eeprom $0 ${0%.elf}.hex && avrdude -p c128 -c jtag3isp -B 100khz -U flash:w:${0%.elf}.hex"]
+
+[unstable]
+build-std = ["core"] # This compiles the 'core' library for AVR on the fly
+
+# Local Variables:
+# jinx-local-words: "arg avr cpu gcc mmcu"
+# End:
