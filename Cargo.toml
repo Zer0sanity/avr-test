@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 avr-device = { version = "0.8.1", features = ["at90can128", "rt"] }
 panic-halt = "1.0.0"
+critical-section = "1.1"
 
 [profile.release]
 panic = "abort"

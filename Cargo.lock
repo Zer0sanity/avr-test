@@ -73,6 +73,7 @@ name = "avr-test"
 version = "0.1.0"
 dependencies = [
  "avr-device",
+ "critical-section",
  "panic-halt",
 ]
 
