@@ -5,9 +5,9 @@ use avr_device::at90can128;
 use core::panic::PanicInfo;
 
 mod mpi104_hal;
-use mpi104_hal::LED;
 use mpi104_hal::Timer;
 use mpi104_hal::UsbFT240;
+use mpi104_hal::{CanLED, ErrLED, LED};
 
 mod executor;
 use executor::{Executor, Join};
@@ -20,8 +20,9 @@ const TIMER_TARGET: u16 = (CPU_FREQ / PRESCALER / 1000) as u16 - 1;
 fn main() -> ! {
     let dp = at90can128::Peripherals::take().unwrap();
 
-    let error_led = LED::new(&dp.PORTB, 6);
-    let can_led = LED::new(&dp.PORTB, 7);
+    let err_led = ErrLED::from(&dp);
+
+    let can_led = CanLED::from(&dp);
 
     let usb = UsbFT240::new(&dp);
 
@@ -30,7 +31,7 @@ fn main() -> ! {
     unsafe { avr_device::interrupt::enable() };
 
     let combined_future = Join {
-        a: error_blink_task(&error_led),
+        a: error_blink_task(&err_led),
         b: can_blink_task(&can_led),
     };
 
@@ -41,18 +42,32 @@ fn main() -> ! {
     loop {}
 }
 
-pub async fn error_blink_task(led: &LED<'_>) {
-    led.set_off();
+pub async fn error_blink_task(led: &ErrLED<'_>) {
+    led.off();
     loop {
         led.toggle();
+        Timer::delay(500).await;
+
+        if led.is_on() {
+            led.off();
+        } else {
+            led.on()
+        }
         Timer::delay(500).await;
     }
 }
 
-pub async fn can_blink_task(led: &LED<'_>) {
-    led.set_off();
+pub async fn can_blink_task(led: &CanLED<'_>) {
+    led.off();
     loop {
         led.toggle();
+        Timer::delay(100).await;
+
+        if led.is_on() {
+            led.off();
+        } else {
+            led.on()
+        }
         Timer::delay(100).await;
     }
 }

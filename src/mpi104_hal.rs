@@ -1,4 +1,6 @@
 mod led;
+pub use self::led::CanLED;
+pub use self::led::ErrLED;
 pub use self::led::LED;
 mod timer;
 pub use self::timer::Timer;
