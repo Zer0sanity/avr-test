@@ -31,7 +31,7 @@ fn main() -> ! {
     unsafe { avr_device::interrupt::enable() };
 
     let combined_future = Join {
-        a: error_blink_task(&err_led),
+        a: error_blink_task(&err_led, &usb),
         b: can_blink_task(&can_led),
     };
 
@@ -42,7 +42,9 @@ fn main() -> ! {
     loop {}
 }
 
-pub async fn error_blink_task(led: &ErrLED<'_>) {
+pub async fn error_blink_task(led: &ErrLED<'_>, usb: &UsbFT240<'_>) {
+    let my_str: &'static str = "Hello, World!";
+
     led.off();
     loop {
         led.toggle();
@@ -54,6 +56,8 @@ pub async fn error_blink_task(led: &ErrLED<'_>) {
             led.on()
         }
         Timer::delay(500).await;
+
+        my_str.bytes().for_each(|data| usb.tx_byte(data));
     }
 }
 
@@ -76,34 +80,3 @@ pub async fn can_blink_task(led: &CanLED<'_>) {
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
 }
-
-// use heapless::spsc::Queue; // Single-producer, single-consumer queue
-
-// static mut USB_BUFFER: Queue<u8, 64> = Queue::new();
-
-// struct UsbStream<'a> {
-//     consumer: Queue<u8, 64>::Consumer<'a>,
-// }
-
-// impl<'a> UsbStream<'a> {
-//     async fn next_byte(&mut self) -> u8 {
-//         loop {
-//             if let Some(byte) = self.consumer.dequeue() {
-//                 return byte;
-//             }
-//             // If empty, yield back to executor
-//             YieldFuture.await;
-//         }
-//     }
-// }
-
-// #[derive(serde::Deserialize)]
-// struct CanPacket {
-//     id: u32,
-//     data: [u8; 8],
-// }
-
-// // In your task:
-// let mut raw_buf = [0u8; 16];
-// // fill raw_buf from UsbStream...
-// let packet: CanPacket = postcard::from_bytes(&raw_buf).unwrap();
