@@ -5,16 +5,13 @@ use avr_device::at90can128;
 use core::panic::PanicInfo;
 
 mod mpi104_hal;
+pub use crate::mpi104_hal::timer::*;
 use mpi104_hal::Timer;
 use mpi104_hal::UsbFT240;
 use mpi104_hal::{CanLED, ErrLED, LED};
 
 mod executor;
 use executor::{Executor, Join};
-
-const CPU_FREQ: u32 = 14_745_600;
-const PRESCALER: u32 = 64;
-const TIMER_TARGET: u16 = (CPU_FREQ / PRESCALER / 1000) as u16 - 1;
 
 #[avr_device::entry]
 fn main() -> ! {
@@ -26,7 +23,7 @@ fn main() -> ! {
 
     let usb = UsbFT240::new(&dp);
 
-    Timer::init(&dp.TC1, TIMER_TARGET);
+    Timer::init(&dp.TC1);
 
     unsafe { avr_device::interrupt::enable() };
 
@@ -43,34 +40,34 @@ fn main() -> ! {
 }
 
 pub async fn error_blink_task(led: &ErrLED<'_>, usb: &UsbFT240<'_>) {
-    let my_str: &'static str = "Hello, World!";
+    let on_str: &'static str = "ON";
+    let off_str: &'static str = "OFF";
 
     led.off();
-    loop {
-        led.toggle();
-        Timer::delay(500).await;
 
+    loop {
         if led.is_on() {
             led.off();
+            off_str.bytes().for_each(|data| {
+                usb.tx_byte(data);
+            });
         } else {
-            led.on()
+            led.on();
+            on_str.bytes().for_each(|data| {
+                usb.tx_byte(data);
+            });
         }
         Timer::delay(500).await;
-
-        my_str.bytes().for_each(|data| usb.tx_byte(data));
     }
 }
 
 pub async fn can_blink_task(led: &CanLED<'_>) {
     led.off();
     loop {
-        led.toggle();
-        Timer::delay(100).await;
-
         if led.is_on() {
             led.off();
         } else {
-            led.on()
+            led.on();
         }
         Timer::delay(100).await;
     }

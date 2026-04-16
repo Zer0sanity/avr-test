@@ -39,13 +39,13 @@ impl<'a> UsbFT240<'a> {
         data_bus.portc().write(|w| unsafe { w.bits(0xFF) }); // All Pull-up
 
         // external interrupts
-        periphals.EXINT.eicrb().modify(|_, w| { w
-            .isc5().falling_edge_of_intx() // TXE(PE5/INT5)
-            .isc6().falling_edge_of_intx() // RXF(PE6/INT6)
-        });
+        // periphals.EXINT.eicrb().modify(|_, w| { w
+        //     .isc5().falling_edge_of_intx() // TXE(PE5/INT5)
+        //     .isc6().falling_edge_of_intx() // RXF(PE6/INT6)
+        // });
 
-        // clear flags: On AVR, write a '1' to the flag bit to clear it.
-        periphals.EXINT.eifr().write(|w| unsafe { w.bits((1 << 5) | (1 << 6)) });
+        // // clear flags: On AVR, write a '1' to the flag bit to clear it.
+        // periphals.EXINT.eifr().write(|w| unsafe { w.bits((1 << 5) | (1 << 6)) });
 
         Self { ctl_port, sense_port, data_bus }
     }

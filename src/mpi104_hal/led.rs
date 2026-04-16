@@ -28,7 +28,7 @@ impl<'a> LED for ErrLED<'a> {
     }
 
     fn toggle(&self) {
-        self.port.pinb().write(|w| w.pb6().set_bit());
+        self.port.pinb().modify(|_, w| w.pb6().set_bit());
     }
 
     fn is_on(&self) -> bool {
@@ -63,7 +63,7 @@ impl<'a> LED for CanLED<'a> {
     }
 
     fn toggle(&self) {
-        self.port.pinb().write(|w| w.pb7().set_bit());
+        self.port.pinb().modify(|_, w| w.pb7().set_bit());
     }
 
     fn is_on(&self) -> bool {
