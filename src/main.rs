@@ -4,14 +4,15 @@
 use avr_device::at90can128;
 use core::panic::PanicInfo;
 
-mod mpi104_hal;
-pub use crate::mpi104_hal::timer::*;
-use mpi104_hal::Timer;
-use mpi104_hal::UsbFT240;
-use mpi104_hal::{CanLED, ErrLED, LED};
+pub mod executor;
+pub mod led;
+pub mod timer;
+pub mod usb_ft240;
 
-mod executor;
-use executor::{Executor, Join};
+pub use executor::*;
+pub use led::*;
+pub use timer::*;
+pub use usb_ft240::*;
 
 #[avr_device::entry]
 fn main() -> ! {
@@ -25,12 +26,12 @@ fn main() -> ! {
 
     Timer::init(&dp.TC1);
 
-    unsafe { avr_device::interrupt::enable() };
-
     let combined_future = Join {
         a: error_blink_task(&err_led, &usb),
-        b: can_blink_task(&can_led),
+        b: can_blink_task(&can_led, &usb),
     };
+
+    unsafe { avr_device::interrupt::enable() };
 
     // 3. Start the Executor
     let mut executor = Executor::new(combined_future);
@@ -40,8 +41,8 @@ fn main() -> ! {
 }
 
 pub async fn error_blink_task(led: &ErrLED<'_>, usb: &UsbFT240<'_>) {
-    let on_str: &'static str = "ON";
-    let off_str: &'static str = "OFF";
+    let on_str: &'static str = "ON\r\n";
+    let off_str: &'static str = "OFF\r\n";
 
     led.off();
 
@@ -57,11 +58,13 @@ pub async fn error_blink_task(led: &ErrLED<'_>, usb: &UsbFT240<'_>) {
                 usb.tx_byte(data);
             });
         }
-        Timer::delay(500).await;
+        usb.flush();
+
+        Timer::delay(250).await;
     }
 }
 
-pub async fn can_blink_task(led: &CanLED<'_>) {
+pub async fn can_blink_task(led: &CanLED<'_>, usb: &UsbFT240<'_>) {
     led.off();
     loop {
         if led.is_on() {
@@ -69,7 +72,9 @@ pub async fn can_blink_task(led: &CanLED<'_>) {
         } else {
             led.on();
         }
-        Timer::delay(100).await;
+
+        let t = Timer::delay(50);
+        t.await;
     }
 }
 

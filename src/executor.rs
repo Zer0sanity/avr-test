@@ -13,19 +13,14 @@ impl<A: Future<Output = ()>, B: Future<Output = ()>> Future for Join<A, B> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Safety: We are manually projecting pinning to the inner fields
-        let (a, b) = unsafe {
-            let this = self.get_unchecked_mut();
-            (
-                Pin::new_unchecked(&mut this.a),
-                Pin::new_unchecked(&mut this.b),
-            )
-        };
+        let this = unsafe { self.get_unchecked_mut() };
+        let mut a_pinned = unsafe { Pin::new_unchecked(&mut this.a) };
+        let mut b_pinned = unsafe { Pin::new_unchecked(&mut this.b) };
 
-        // Poll both tasks. We don't care about the return Poll here
-        // because these tasks loop forever.
-        let _ = a.poll(cx);
-        let _ = b.poll(cx);
+        // Alternate which one gets polled first,
+        // or just ensure they both run without Task A blocking
+        let _ = a_pinned.as_mut().poll(cx);
+        let _ = b_pinned.as_mut().poll(cx);
 
         Poll::Pending
     }
