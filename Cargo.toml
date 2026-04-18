@@ -5,8 +5,9 @@ edition = "2024"
 
 [dependencies]
 avr-device = { version = "0.8.1", features = ["at90can128", "rt"] }
+avr-hal-generic = { git = "https://github.com/rahix/avr-hal", subcrate = "avr-hal-generic" }
 panic-halt = "1.0.0"
-critical-section = "1.1"
+#critical-section = "1.1"
 
 [profile.release]
 panic = "abort"
@@ -14,5 +15,5 @@ lto = true
 opt-level = "s" # 's' or 'z' for small binary size (critical for AVR)
 
 # Local Variables:
-# jinx-local-words: "avr"
+# jinx-local-words: #("avr hal" 0 3 (jinx--group "Suggestions from session" jinx--prefix #("07 " 0 3 (face jinx-key)) jinx--suffix nil))
 # End:

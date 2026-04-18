@@ -1,110 +1,117 @@
+use crate::hal::Pin;
 use avr_device::at90can128;
+use avr_hal_generic::port::{self, mode};
 
-pub struct UsbFT240<'a> {
-    ctl_port: &'a at90can128::porte::RegisterBlock,
-    sense_port: &'a at90can128::portg::RegisterBlock,
-    data_bus: &'a at90can128::portc::RegisterBlock,
+pub struct UsbFT240 {
+    siwu: Pin<mode::Output>, //SIWU Output to tell the FT240 to flush its transmit FIFO buffer to the PC
+    rd: Pin<mode::Output>, // RD Output to have the FT240 put a received byte from its FIFO to the data bus
+    wr: Pin<mode::Output>, // WR Output to have the FT240 read data byte from data bus to its transmit FIFO
+    txe: Pin<mode::Input>, // TXE Input to tell when the FT240 can accept data.  Pin will also be setup to generate an interrupt on falling edge when transmitting data
+    rxf: Pin<mode::Input>, // RXF Input to tell when data can be read from the FT240.  Pin will also be setup to generate an interrupt on falling edge for receiving data
+    sense: Pin<mode::Input>, // SENSE input to tell if USB is connected
+    bus_ptr: *const at90can128::portc::RegisterBlock, // BUS input/output port for read/write store as a pointer so we can preform full port read and writes
 }
 
-impl<'a> UsbFT240<'a> {
-    //Output 
+impl UsbFT240 {
+    //Output
     #[rustfmt::skip]
-    pub fn new(periphals: &'a at90can128::Peripherals) -> Self {
-        // control signals
-        let ctl_port = &periphals.PORTE;
-        ctl_port.ddre().modify(|_, w| { w
-            .pe2().set_bit() // SIWU Output to tell the FT240 to flush its transmit FIFO buffer to the PC
-            .pe4().set_bit() // RD Output to have the FT240 put a received byte from its FIFO to the data bus
-            .pe7().set_bit() // WR Output to have the FT240 read data byte from data bus to its transmit FIFO
-            .pe5().clear_bit() // TXE Input to tell when the FT240 can accept data.  Pin will also be setup to generate an interrupt on falling edge when transmitting data
-            .pe6().clear_bit() // RXF Input to tell when data can be read from the FT240.  Pin will also be setup to generate an interrupt on falling edge for receiving data 
-        });
-        
-        // pull up the outputs
-        ctl_port.porte().modify(|_, w| { w
-            .pe2().set_bit() // Active Low Pull-up
-            .pe4().set_bit() // Active Low Pull-up
-            .pe7().set_bit() // Active Low Pull-up
-        });
+    pub fn new(
+        siwu: Pin<mode::Output>,
+        rd: Pin<mode::Output>,
+        wr: Pin<mode::Output>,
+        txe: Pin<mode::Input>,
+        rxf: Pin<mode::Input>,
+        sense: Pin<mode::Input>,
+        bus_ptr: *const at90can128::portc::RegisterBlock,
+    ) -> Self {
+        // Prepare initial states: active-low pins should start High (Off)
+        let mut usb = Self {
+            siwu, rd, wr, txe, rxf, sense, bus_ptr,
+        };
 
-        // USB sense
-        let sense_port = &periphals.PORTG;
-        // To disable pull-up/set floating on AVR, we clear the PORT bit
-        sense_port.ddrg().modify(|_, w| w.pg2().clear_bit());
-        sense_port.ping().modify(|_, w| w.pg2().clear_bit());
+        usb.siwu.set_high();
+        usb.rd.set_high();
+        usb.wr.set_high();
 
-        // data bus
-        let data_bus = &periphals.PORTC;
-        data_bus.ddrc().write(|w| unsafe { w.bits(0x00) }); // All Inputs
-        data_bus.portc().write(|w| unsafe { w.bits(0xFF) }); // All Pull-up
+        // Initialize the bus as high-impedance (Input + Pull-up)
+        unsafe {
+            let bus = &*usb.bus_ptr;
+            bus.ddrc().write(|w| w.bits(0x00));
+            bus.portc().write(|w| w.bits(0xFF));
+        }
 
-        // external interrupts
-        // periphals.EXINT.eicrb().modify(|_, w| { w
-        //     .isc5().falling_edge_of_intx() // TXE(PE5/INT5)
-        //     .isc6().falling_edge_of_intx() // RXF(PE6/INT6)
-        // });
-
-        // // clear flags: On AVR, write a '1' to the flag bit to clear it.
-        // periphals.EXINT.eifr().write(|w| unsafe { w.bits((1 << 5) | (1 << 6)) });
-
-        Self { ctl_port, sense_port, data_bus }
+        usb
     }
-
     // This sub will preform the required operation to transmit byte to the FT240.
-    // NOTE:  This sub is not thread safe and should be called with interrupts disabled if interrupts are being used. 
-    pub fn tx_byte(&self, data: u8)
-    {
-        // The data bus should currently be configured as inputs with pull-ups enabled.
-        // We first need to reconfigure the port as an output
-        self.data_bus.ddrc().write(|w| unsafe { w.bits(0xff) });
-        // Put the data onto the pins
-        self.data_bus.portc().write(|w| unsafe { w.bits(data) });
-        // Pull the WR line low so FT240 will sample the data bus and store it to its FIFO
-        self.ctl_port.porte().modify(|_, w| w.pe7().clear_bit());
-        // Preform a nop to allow time for the FT240 to sample the data bus
-        avr_device::asm::nop();
-        // Release the WR line since we are done with the operation
-        self.ctl_port.porte().modify(|_, w| w.pe7().set_bit());
-        // Reconfigure the data bus pins as inputs with pull-ups enabled
-        self.data_bus.ddrc().write(|w| unsafe { w.bits(0x00) });
-        self.data_bus.portc().write(|w| unsafe { w.bits(0xFF) });        
+    // NOTE:  This sub is not thread safe and should be called with interrupts disabled if interrupts are being used.
+    pub fn tx_byte(&mut self, data: u8) {
+        // someone is going to cringe, but real men are unsafe
+        unsafe {
+            // deference the data bus
+            let bus = &*self.bus_ptr;
+            // The data bus should currently be configured as inputs with pull-ups enabled.
+            // We first need to reconfigure the port as an output
+            bus.ddrc().write(|w| w.bits(0xff));
+            // Put the data onto the pins
+            bus.portc().write(|w| w.bits(data));
+            // Pull the WR line low so FT240 will sample the data bus and store it to its FIFO
+            self.wr.set_low();
+            // Preform a nop to allow time for the FT240 to sample the data bus
+            avr_device::asm::nop();
+            // Release the WR line since we are done with the operation
+            self.wr.set_high();
+            // Reconfigure the data bus pins as inputs with pull-ups enabled
+            bus.ddrc().write(|w| w.bits(0x00));
+            bus.portc().write(|w| w.bits(0xff));
+        }
     }
 
     // This sub will preform the required operation to receive a byte from the FT240.
     // NOTE:  This sub is not thread safe and should be called with interrupts disabled
-    // if interrupts are being used. 
-    pub fn rx_byte(&self) -> u8
-    {
-        // After ever RX or TX operation we reconfigure the data bus as inputs pulled up.  Therefore the ports DDR should already
-        // be set properly.  All that is needed is to disable the pull-ups to allow the FT240 to drive them
-        self.data_bus.portc().write(|w| unsafe { w.bits(0x00) });        
-        // Pull the RD line low so the FT240 will present a received byte from its FIFO to the data bus
-        self.ctl_port.porte().modify(|_, w| w.pe4().clear_bit());
-        // Preform a nop to allow time for the data bus port to stabilize and the FT240 to present the data 
-        avr_device::asm::nop();
-        // Read the data
-        let data = self.data_bus.pinc().read().bits();
-        // Release the RD line since we are done with the operation
-        self.ctl_port.porte().modify(|_, w| w.pe4().set_bit());
-        // Re-enable the pull-ups
-        self.data_bus.portc().write(|w| unsafe { w.bits(0xff) });        
-        //Return the value
-        data
+    // if interrupts are being used.
+    pub fn rx_byte(&mut self) -> u8 {
+        // someone is going to cringe, but there pronouns are her/she
+        unsafe {
+            // deference the data bus
+            let bus = &*self.bus_ptr;
+            // After ever RX or TX operation we reconfigure the data bus as inputs pulled up.  Therefore the ports DDR should already
+            // be set properly.  All that is needed is to disable the pull-ups to allow the FT240 to drive them
+            bus.portc().write(|w| w.bits(0x00));
+            // Pull the RD line low so the FT240 will present a received byte from its FIFO to the data bus
+            self.rd.set_low();
+            // Preform a nop to allow time for the data bus port to stabilize and the FT240 to present the data
+            avr_device::asm::nop();
+            // Read the data
+            let data = bus.pinc().read().bits();
+            // Release the RD line since we are done with the operation
+            self.rd.set_high();
+            // Re-enable the pull-ups
+            bus.portc().write(|w| w.bits(0xff));
+            //Return the value
+            data
+        }
+    }
+
+    // This sub will write the bytes in the slice to the FT240 and preform a flush
+    pub fn write(&mut self, bytes: &[u8]) {
+        // write each byte
+        bytes.into_iter().for_each(|data| {
+            self.tx_byte(*data);
+        });
+        // flush
+        self.flush();
     }
 
     //Routine pulses the SIWU(Send Immediate/PC Wake-up) line to flush the FT240s Tx FIFO to the host
-    pub fn flush(&self)
-    {
+    pub fn flush(&mut self) {
         //Pull the SIWU pin low
-        self.ctl_port.porte().modify(|_,w| w.pe2().clear_bit());
+        self.siwu.set_low();
+        // Preform a nop to allow time to sense the logic level change
+        avr_device::asm::nop();
         //Pull the SIWU back up
-        self.ctl_port.porte().modify(|_,w| w.pe2().set_bit());
+        self.siwu.set_high();
     }
-
 }
-
-
-
 
 // use heapless::spsc::Queue; // Single-producer, single-consumer queue
 

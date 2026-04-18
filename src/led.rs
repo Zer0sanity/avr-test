@@ -1,78 +1,42 @@
+use crate::hal::Pin;
 use avr_device::at90can128;
+use avr_hal_generic::port::{self, mode};
 
-pub trait LED {
-    fn on(&self);
-    fn off(&self);
-    fn toggle(&self);
-    fn is_on(&self) -> bool;
+pub struct LED {
+    pin: Pin<mode::Output>,
+    active_low: bool,
 }
 
-pub struct ErrLED<'a> {
-    port: &'a at90can128::portb::RegisterBlock,
-}
-
-impl<'a> ErrLED<'a> {
-    pub fn new(port: &'a at90can128::portb::RegisterBlock) -> Self {
-        port.ddrb().modify(|_, w| w.pb6().set_bit());
-        Self { port }
-    }
-}
-
-impl<'a> LED for ErrLED<'a> {
-    fn on(&self) {
-        self.port.portb().modify(|_, w| w.pb6().clear_bit());
+impl LED {
+    pub fn new(pin: Pin<mode::Output>, active_low: bool) -> Self {
+        Self { pin, active_low }
     }
 
-    fn off(&self) {
-        self.port.portb().modify(|_, w| w.pb6().set_bit());
+    pub fn on(&mut self) {
+        if self.active_low {
+            self.pin.set_low()
+        } else {
+            self.pin.set_high()
+        }
     }
 
-    fn toggle(&self) {
-        self.port.pinb().modify(|_, w| w.pb6().set_bit());
+    pub fn off(&mut self) {
+        if self.active_low {
+            self.pin.set_high()
+        } else {
+            self.pin.set_low()
+        }
     }
 
-    fn is_on(&self) -> bool {
-        self.port.pinb().read().pb6().bit_is_clear()
-    }
-}
-
-impl<'a> From<&'a at90can128::Peripherals> for ErrLED<'a> {
-    fn from(value: &'a at90can128::Peripherals) -> Self {
-        ErrLED::new(&value.PORTB)
-    }
-}
-
-pub struct CanLED<'a> {
-    port: &'a at90can128::portb::RegisterBlock,
-}
-
-impl<'a> CanLED<'a> {
-    pub fn new(port: &'a at90can128::portb::RegisterBlock) -> Self {
-        port.ddrb().modify(|_, w| w.pb7().set_bit());
-        Self { port }
-    }
-}
-
-impl<'a> LED for CanLED<'a> {
-    fn on(&self) {
-        self.port.portb().modify(|_, w| w.pb7().clear_bit());
+    pub fn toggle(&mut self) {
+        self.pin.toggle();
     }
 
-    fn off(&self) {
-        self.port.portb().modify(|_, w| w.pb7().set_bit());
-    }
-
-    fn toggle(&self) {
-        self.port.pinb().modify(|_, w| w.pb7().set_bit());
-    }
-
-    fn is_on(&self) -> bool {
-        self.port.pinb().read().pb7().bit_is_clear()
-    }
-}
-
-impl<'a> From<&'a at90can128::Peripherals> for CanLED<'a> {
-    fn from(value: &'a at90can128::Peripherals) -> Self {
-        CanLED::new(&value.PORTB)
+    pub fn is_on(&self) -> bool {
+        if self.active_low {
+            self.pin.is_set_low()
+        } else {
+            self.pin.is_set_high()
+        }
     }
 }

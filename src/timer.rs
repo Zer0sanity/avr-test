@@ -6,11 +6,15 @@ use core::{
 
 use avr_device::at90can128;
 
+use avr_device::interrupt::Mutex;
+use core::cell::Cell;
+
 const CPU_FREQ: u32 = 14_745_600;
 const PRESCALER: u32 = 64;
 const TIMER_TARGET: u16 = (CPU_FREQ / PRESCALER / 1000) as u16 - 1;
 
-static mut TICK_COUNT: u16 = 0;
+static TICK_COUNT: Mutex<Cell<u16>> = Mutex::new(Cell::new(0));
+static WAKE_MASK: Mutex<Cell<u16>> = Mutex::new(Cell::new(0));
 
 pub struct Timer {
     target_tick: u16,
@@ -32,16 +36,7 @@ impl Timer {
     }
 
     pub fn get_tick_counter() -> u16 {
-        // disable interrupts
-        avr_device::interrupt::disable();
-        // grab the current tick count
-        let tick_count = unsafe { TICK_COUNT };
-        // enable interrupts
-        unsafe {
-            avr_device::interrupt::enable();
-        }
-        // return the count
-        tick_count
+        avr_device::interrupt::free(|cs| TICK_COUNT.borrow(cs).get())
     }
 }
 
@@ -63,8 +58,8 @@ impl Future for Timer {
 
 #[avr_device::interrupt(at90can128)]
 fn TIMER1_COMPA() {
-    // Increment the tick every millisecond
-    unsafe {
-        TICK_COUNT += 1;
-    }
+    // Forge a token. This is safe ONLY because we are in an ISR.
+    let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
+    TICK_COUNT.borrow(cs).update(|counter| counter + 1);
+    WAKE_MASK.borrow(cs).set(0xff);
 }

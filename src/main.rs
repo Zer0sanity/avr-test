@@ -1,9 +1,12 @@
 #![no_std]
 #![no_main]
 #![feature(abi_avr_interrupt)]
-use avr_device::at90can128;
 use core::panic::PanicInfo;
 
+use avr_device::at90can128;
+use avr_hal_generic::port::{self, mode};
+use hal::Pin;
+use hal::Pins;
 pub mod executor;
 pub mod led;
 pub mod timer;
@@ -14,21 +17,33 @@ pub use led::*;
 pub use timer::*;
 pub use usb_ft240::*;
 
+// This macro creates the 'Pins' struct and implements all the high-level logic.
+
+pub mod hal;
+
 #[avr_device::entry]
 fn main() -> ! {
     let dp = at90can128::Peripherals::take().unwrap();
 
-    let err_led = ErrLED::from(&dp);
+    let pins = Pins::new(dp.PORTB, dp.PORTC, dp.PORTE, dp.PORTG);
+    let err_led = LED::new(pins.pb6.into_output().downgrade(), true);
+    let can_led = LED::new(pins.pb7.into_output().downgrade(), true);
 
-    let can_led = CanLED::from(&dp);
-
-    let usb = UsbFT240::new(&dp);
+    let usb = UsbFT240::new(
+        pins.pe2.into_output().downgrade(),
+        pins.pe4.into_output().downgrade(),
+        pins.pe7.into_output().downgrade(),
+        pins.pe5.into_floating_input().downgrade().forget_imode(),
+        pins.pe6.into_floating_input().downgrade().forget_imode(),
+        pins.pg2.into_floating_input().downgrade().forget_imode(),
+        at90can128::PORTC::ptr(),
+    );
 
     Timer::init(&dp.TC1);
 
     let combined_future = Join {
-        a: error_blink_task(&err_led, &usb),
-        b: can_blink_task(&can_led, &usb),
+        a: error_blink_task(err_led, usb),
+        b: can_blink_task(can_led),
     };
 
     unsafe { avr_device::interrupt::enable() };
@@ -40,41 +55,31 @@ fn main() -> ! {
     loop {}
 }
 
-pub async fn error_blink_task(led: &ErrLED<'_>, usb: &UsbFT240<'_>) {
+pub async fn error_blink_task(mut led: LED, mut usb: UsbFT240) {
     let on_str: &'static str = "ON\r\n";
     let off_str: &'static str = "OFF\r\n";
 
-    led.off();
+    led.on();
 
     loop {
         if led.is_on() {
             led.off();
-            off_str.bytes().for_each(|data| {
-                usb.tx_byte(data);
-            });
+            usb.write(off_str.as_bytes());
         } else {
             led.on();
-            on_str.bytes().for_each(|data| {
-                usb.tx_byte(data);
-            });
+            usb.write(on_str.as_bytes());
         }
-        usb.flush();
-
         Timer::delay(250).await;
     }
 }
 
-pub async fn can_blink_task(led: &CanLED<'_>, usb: &UsbFT240<'_>) {
-    led.off();
-    loop {
-        if led.is_on() {
-            led.off();
-        } else {
-            led.on();
-        }
+// pub async fn can_blink_task(mut led: Pin<mode::Output, PB7>, usb: &UsbFT240<'_>) {
+pub async fn can_blink_task(mut led: LED) {
+    led.on();
 
-        let t = Timer::delay(50);
-        t.await;
+    loop {
+        led.toggle();
+        Timer::delay(50).await;
     }
 }
 
