@@ -91,6 +91,7 @@ dependencies = [
  "avr-device",
  "avr-hal-generic",
  "panic-halt",
+ "portable-atomic",
 ]
 
 [[package]]
@@ -486,6 +487,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
 dependencies = [
  "siphasher",
+]
+
+[[package]]
+name = "portable-atomic"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
+dependencies = [
+ "critical-section",
 ]
 
 [[package]]
