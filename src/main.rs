@@ -8,18 +8,17 @@ use avr_hal_generic::port::{self, mode};
 use hal::Pin;
 use hal::Pins;
 pub mod executor;
+pub mod hal;
 pub mod led;
 pub mod timer;
+// pub mod usb_driver;
 pub mod usb_ft240;
 
 pub use executor::*;
 pub use led::*;
 pub use timer::*;
+// pub use usb_driver::*;
 pub use usb_ft240::*;
-
-// This macro creates the 'Pins' struct and implements all the high-level logic.
-
-pub mod hal;
 
 #[avr_device::entry]
 fn main() -> ! {
@@ -37,6 +36,7 @@ fn main() -> ! {
         pins.pe6.into_floating_input().downgrade().forget_imode(),
         pins.pg2.into_floating_input().downgrade().forget_imode(),
         at90can128::PORTC::ptr(),
+        at90can128::EXINT::ptr(),
     );
 
     Timer::init(&dp.TC1);
