@@ -7,17 +7,21 @@ use avr_device::at90can128;
 use avr_hal_generic::port::{self, mode};
 use hal::Pin;
 use hal::Pins;
+pub mod driver;
 pub mod executor;
 pub mod hal;
 pub mod led;
 pub mod timer;
+pub mod wait_pin_state;
 // pub mod usb_driver;
 pub mod usb_ft240;
 
 pub use executor::*;
 pub use led::*;
 pub use timer::*;
+pub use wait_pin_state::*;
 // pub use usb_driver::*;
+pub use driver::*;
 pub use usb_ft240::*;
 
 #[avr_device::entry]
@@ -28,7 +32,7 @@ fn main() -> ! {
     let err_led = LED::new(pins.pb6.into_output().downgrade(), true);
     let can_led = LED::new(pins.pb7.into_output().downgrade(), true);
 
-    let usb = UsbFT240::new(
+    let usb = UsbFT240::init(
         pins.pe2.into_output().downgrade(),
         pins.pe4.into_output().downgrade(),
         pins.pe7.into_output().downgrade(),

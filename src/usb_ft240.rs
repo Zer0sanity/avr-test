@@ -1,41 +1,38 @@
-use core::{any::Any, task::{Context, Poll}};
-use crate::hal::Pin;
+use core::{any::Any, cell::RefCell, task::{Context, Poll}};
+use crate::{TxStatus, hal::Pin};
+use crate::wait_pin_state::WaitPinState;
+use crate::driver::*;
 
-use avr_device::at90can128;
+use avr_device::{at90can128, interrupt::Mutex};
 use avr_hal_generic::port::{self, mode};
 
+static USB_INSTANCE: Mutex<RefCell<Option<UsbFT240>>> = Mutex::new(RefCell::new(None));
+static TX_CALLBACK: Mutex<RefCell<Option<TxCallback>>> = Mutex::new(RefCell::new(None));
 
-pub struct WaitOnPin<'a> {
-    state: bool,
-    pin_to_check: &'a Pin<mode::Input> 
-}
+pub struct UsbHandle;
 
-impl<'a> WaitOnPin<'a> {
-    pub fn clear(pin_to_check: &'a Pin<mode::Input>) -> Self{
-        Self { state: false, pin_to_check }
+impl Driver for UsbHandle{
+        fn connected(&self) -> bool {
+        avr_device::interrupt::free(|cs| {
+            USB_INSTANCE.borrow(cs).borrow().as_ref()
+                .map_or(false, |usb| usb.sense.is_high())
+        })
     }
 
-    pub fn set(pin_to_check: &'a Pin<mode::Input>) -> Self{
-        Self { state: true, pin_to_check }
+    fn init_tx(&self, tx_callback: TxCallback) {
+        // Register the callback globally
+        avr_device::interrupt::free(|cs| {
+            if let Some(usb) = USB_INSTANCE.borrow(cs).borrow_mut().as_mut() {
+                // set the callback for the isr
+                TX_CALLBACK.borrow(cs).set(tx_callback);
+                // get the first byte
+                if let TxStatus::NextByte(data) = tx_callback(){
+                    usb.init_tx(data);
+                }
+            }
+        });
     }
 }
-
-impl<'a> Future for WaitOnPin<'a> {
-    type Output = ();
-    fn poll(self: core::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.pin_to_check.is_high() == self.state {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    }
-}
-
-pub enum TxStatus {
-    NextByte(u8),
-    Finished,
-}
-
 
 pub struct UsbFT240 {
     siwu: Pin<mode::Output>, //SIWU Output to tell the FT240 to flush its transmit FIFO buffer to the PC
@@ -49,9 +46,8 @@ pub struct UsbFT240 {
 }
 
 impl UsbFT240 {
-    //Output
     #[rustfmt::skip]
-    pub fn new(
+    pub fn init(
         siwu: Pin<mode::Output>,
         rd: Pin<mode::Output>,
         wr: Pin<mode::Output>,
@@ -59,8 +55,8 @@ impl UsbFT240 {
         rxf: Pin<mode::Input>,
         sense: Pin<mode::Input>,
         bus_ptr: *const at90can128::portc::RegisterBlock,
-    ext_int_ptr: *const at90can128::exint::RegisterBlock,
-    ) -> Self {
+        ext_int_ptr: *const at90can128::exint::RegisterBlock,
+    ) -> UsbHandle {
         // Prepare initial states: active-low pins should start High (Off)
         let mut usb = Self {
             siwu, rd, wr, txe, rxf, sense, bus_ptr,ext_int_ptr
@@ -71,14 +67,18 @@ impl UsbFT240 {
         usb.wr.set_high();
         
         unsafe {
-        // initialize the bus as high-impedance (Input + Pull-up)
+            // initialize the bus as high-impedance (Input + Pull-up)
             let bus = &*usb.bus_ptr;
             bus.ddrc().write(|w| w.bits(0x00));
             bus.portc().write(|w| w.bits(0xFF));
-
         }
 
-        usb
+        // initialize the static instance
+        avr_device::interrupt::free(|cs| {
+            *USB_INSTANCE.borrow(cs).borrow_mut() = Some(usb);
+        });
+        
+        UsbHandle
     }
 
     // return the state of the sense pin 
@@ -99,40 +99,53 @@ impl UsbFT240 {
     }
 
     // waits for TXE to go low.  initialize transmit interrupts and kick off the first byte
-    pub async fn init_tx<F>(&mut self, mut callback: F) 
-    where F: FnMut() -> TxStatus + 'static {
-    // wait for the TXE pin to go low
-    WaitOnPin::clear(&self.txe).await;
-    // initialize external interrupts
-    let ext_int = unsafe { &*self.ext_int_ptr };
-    // setup TXE(PE5/INT5) to trigger on falling edges
-    ext_int.eicrb().modify(|_, w| w.isc5().falling_edge_of_intx());
-    // clear the INT5 interrupt flags by writing it to true
+    pub fn init_tx<F>(&mut self, data: u8) {
+        // wait for the TXE pin to go low
+        while !self.txe.is_low(){}
+        // initialize external interrupts
+        let ext_int = unsafe { &*self.ext_int_ptr };
+        // setup TXE(PE5/INT5) to trigger on falling edges
+        ext_int.eicrb().modify(|_, w| w.isc5().falling_edge_of_intx());
+        // clear the INT5 interrupt flags by writing it to true
         ext_int.eifr().modify(|_, w| w.intf5().set_bit());
-    // enable interrupts so we get interrupted when the FT240 can accept the next byte
-    ext_int.eimsk().modify(|_, w| w.int5().set_bit());
-        // kick off the first
-        isr_stub();
-}
-    
-    
-    fn isr_stub(){}
+        // enable interrupts so we get interrupted when the FT240 can accept the next byte
+        ext_int.eimsk().modify(|_, w| w.int5().set_bit());
+        // kick off the first one
+        self.tx_byte(data);
+    }
 
+    // pub async fn init_tx<F>(&mut self, tx_callback: TxCallback) {
+    //     // wait for the TXE pin to go low
+    //     WaitPinState::clear(&self.txe).await;
+    //     // initialize external interrupts
+    //     let ext_int = unsafe { &*self.ext_int_ptr };
+    //     // setup TXE(PE5/INT5) to trigger on falling edges
+    //     ext_int.eicrb().modify(|_, w| w.isc5().falling_edge_of_intx());
+    //     // clear the INT5 interrupt flags by writing it to true
+    //     ext_int.eifr().modify(|_, w| w.intf5().set_bit());
+    //     // enable interrupts so we get interrupted when the FT240 can accept the next byte
+    //     ext_int.eimsk().modify(|_, w| w.int5().set_bit());
+    //     // set the callback for the isr
+    //     TX_CALLBACK.borrow(cs).set(tx_callback);
+    //     // kick off the first one
+    //     INT5();
+    // }
+    
     pub fn disable_rx(&self)
 {
     let ext_int = unsafe { &*self.ext_int_ptr };
-        // disable interrupts
-        ext_int.eimsk().modify(|_, w| w.int6().clear_bit());
-        // clear the interrupt flag
+    // disable interrupts
+    ext_int.eimsk().modify(|_, w| w.int6().clear_bit());
+    // clear the interrupt flag
     ext_int.eifr().modify(|_, w| w.intf6().clear_bit());
 }
-
+    
     pub fn disable_tx(&self)
 {
     let ext_int = unsafe { &*self.ext_int_ptr };
-        // disable interrupts
-        ext_int.eimsk().modify(|_, w| w.int5().clear_bit());
-        // clear the interrupt flag
+    // disable interrupts
+    ext_int.eimsk().modify(|_, w| w.int5().clear_bit());
+    // clear the interrupt flag
     ext_int.eifr().modify(|_, w| w.intf5().clear_bit());
 }
 
@@ -209,42 +222,6 @@ impl UsbFT240 {
 
 
 
-// //USB Tx Interrupt.  If there is data to send it will transmit the next byte to the FT240 chip otherwise it will pulse the SIWU
-// //to flush the FT240s Tx FIFO to the host and disable the Tx interrupts.
-// #pragma vector = INT5_vect
-// __interrupt static void int5(void)
-// {
-//     //Execute callback to get the next byte to send or a flush command
-//     TxAction();
-//     //If there was a byte to send
-//     if(USBTxStateObject->TxComplete == true)
-//     {
-//         //Flush the data to the host
-//         FlushFT240BufferToHost();
-//         //Disable the TXE(PE5/INT5) interrupt so we get anymore interrupts until next time we want to send
-//         EIMSK_INT5 = false;          
-//     }
-//     else
-//     {
-//         //Transmit the byte to the FT240 chip
-//         TransmitByteToFT240(USBTxStateObject->TxData);           
-//     }
-// }
-
-
-
-
-// //USB Rx Interrupt
-// #pragma vector = INT6_vect
-// __interrupt static void int6(void)
-// {
-//     //Read the data from the FT240 chip
-//     USBRxStateObject->RxData = ReceiveByteFromFT240(); 
-//     //Execute callback to receive the byte
-//     RxAction(); 
-// }
-
-
 
     
     // This sub will write the bytes in the slice to the FT240 and preform a flush
@@ -259,39 +236,47 @@ impl UsbFT240 {
 
 }
 
-// use heapless::spsc::Queue; // Single-producer, single-consumer queue
 
-// static mut USB_BUFFER: Queue<u8, 64> = Queue::new();
+//USB tx interrupt.  I if there is data to send it will transmit the next byte to the FT240 chip otherwise it will pulse the SIWU
+//to flush the FT240s tx FIFO to the host and disable the tx interrupts.
+#[avr_device::interrupt(at90can128)]
+fn INT5() {
+    // forge a token. this is safe because we are in an ISR.
+    let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
+    // try to get the usb instance
+    if let Some(usb) = USB_INSTANCE.borrow(cs).borrow_mut().as_mut() {
+        // now get the call back to see how to proceed
+        if let Some(callback) = TX_CALLBACK.borrow(cs).get() {
+            // call the callback
+            match callback() {
+                // send the next byte
+                TxStatus::NextByte(b) => usb.tx_byte(b),
+                // flush and disable transmit interrupts
+                TxStatus::Finished => {
+                    usb.flush();
+                    usb.disable_tx();
+                    TX_CALLBACK.borrow(cs).set(None);
+                }
+            }            
+        } else {
+            usb.flush();
+            usb.disable_tx();
+        }
+    }
+}
 
-// struct UsbStream<'a> {
-//     consumer: Queue<u8, 64>::Consumer<'a>,
+
+// //USB Rx Interrupt
+// #pragma vector = INT6_vect
+// __interrupt static void int6(void)
+// {
+//     //Read the data from the FT240 chip
+//     USBRxStateObject->RxData = ReceiveByteFromFT240(); 
+//     //Execute callback to receive the byte
+//     RxAction(); 
 // }
-
-// impl<'a> UsbStream<'a> {
-//     async fn next_byte(&mut self) -> u8 {
-//         loop {
-//             if let Some(byte) = self.consumer.dequeue() {
-//                 return byte;
-//             }
-//             // If empty, yield back to executor
-//             YieldFuture.await;
-//         }
-//     }
-// }
-
-// #[derive(serde::Deserialize)]
-// struct CanPacket {
-//     id: u32,
-//     data: [u8; 8],
-// }
-
-// // In your task:
-// let mut raw_buf = [0u8; 16];
-// // fill raw_buf from UsbStream...
-// let packet: CanPacket = postcard::from_bytes(&raw_buf).unwrap();
-
 
 
 // Local Variables:
-// jinx-local-words: "nop"
+// jinx-local-words: #("isr nop tx usb" 4 7 (jinx--group "Suggestions from session" jinx--prefix #("07 " 0 3 (face jinx-key)) jinx--suffix nil))
 // End:
