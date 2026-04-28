@@ -1,3 +1,5 @@
+use crate::BufferHandle;
+
 pub enum TxStatus {
     NextByte(u8),
     Finished,
@@ -6,6 +8,6 @@ pub enum TxStatus {
 pub type TxCallback = fn() -> TxStatus;
 
 pub trait Driver {
-    fn connected() -> bool;
-    fn init_tx(&self, tx_callback: TxCallback);
+    fn connected(&self) -> bool;
+    fn tx_submit(&self, buffer_handle: BufferHandle, length: u8);
 }

@@ -14,6 +14,7 @@ pub mod led;
 pub mod timer;
 pub mod wait_pin_state;
 // pub mod usb_driver;
+pub mod buffer_pool;
 pub mod usb_ft240;
 
 pub use executor::*;
@@ -21,6 +22,7 @@ pub use led::*;
 pub use timer::*;
 pub use wait_pin_state::*;
 // pub use usb_driver::*;
+pub use buffer_pool::*;
 pub use driver::*;
 pub use usb_ft240::*;
 
@@ -62,6 +64,9 @@ fn main() -> ! {
 pub async fn error_blink_task(mut led: LED, mut usb: UsbFT240) {
     let on_str: &'static str = "ON\r\n";
     let off_str: &'static str = "OFF\r\n";
+
+    let buffer_pool = BufferPool;
+    let hi = buffer_pool.get_buffer();
 
     led.on();
 

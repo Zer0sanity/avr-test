@@ -1,38 +1,14 @@
-use core::{any::Any, cell::RefCell, task::{Context, Poll}};
-use crate::{TxStatus, hal::Pin};
+use core::{any::Any, cell::RefCell, sync::atomic::Ordering, task::{Context, Poll}};
+use crate::{BufferHandle, SyncUnsafeCell, TxStatus, hal::Pin};
 use crate::wait_pin_state::WaitPinState;
 use crate::driver::*;
 
 use avr_device::{at90can128, interrupt::Mutex};
 use avr_hal_generic::port::{self, mode};
+use portable_atomic::{AtomicPtr, AtomicU8, AtomicUsize};
 
-static USB_INSTANCE: Mutex<RefCell<Option<UsbFT240>>> = Mutex::new(RefCell::new(None));
-static TX_CALLBACK: Mutex<RefCell<Option<TxCallback>>> = Mutex::new(RefCell::new(None));
 
-pub struct UsbHandle;
 
-impl Driver for UsbHandle{
-        fn connected(&self) -> bool {
-        avr_device::interrupt::free(|cs| {
-            USB_INSTANCE.borrow(cs).borrow().as_ref()
-                .map_or(false, |usb| usb.sense.is_high())
-        })
-    }
-
-    fn init_tx(&self, tx_callback: TxCallback) {
-        // Register the callback globally
-        avr_device::interrupt::free(|cs| {
-            if let Some(usb) = USB_INSTANCE.borrow(cs).borrow_mut().as_mut() {
-                // set the callback for the isr
-                TX_CALLBACK.borrow(cs).set(tx_callback);
-                // get the first byte
-                if let TxStatus::NextByte(data) = tx_callback(){
-                    usb.init_tx(data);
-                }
-            }
-        });
-    }
-}
 
 pub struct UsbFT240 {
     siwu: Pin<mode::Output>, //SIWU Output to tell the FT240 to flush its transmit FIFO buffer to the PC
@@ -56,7 +32,7 @@ impl UsbFT240 {
         sense: Pin<mode::Input>,
         bus_ptr: *const at90can128::portc::RegisterBlock,
         ext_int_ptr: *const at90can128::exint::RegisterBlock,
-    ) -> UsbHandle {
+    ) -> Self {
         // Prepare initial states: active-low pins should start High (Off)
         let mut usb = Self {
             siwu, rd, wr, txe, rxf, sense, bus_ptr,ext_int_ptr
@@ -72,18 +48,7 @@ impl UsbFT240 {
             bus.ddrc().write(|w| w.bits(0x00));
             bus.portc().write(|w| w.bits(0xFF));
         }
-
-        // initialize the static instance
-        avr_device::interrupt::free(|cs| {
-            *USB_INSTANCE.borrow(cs).borrow_mut() = Some(usb);
-        });
-        
-        UsbHandle
-    }
-
-    // return the state of the sense pin 
-    pub fn connected(&self) -> bool {
-        self.sense.is_high()
+usb
     }
 
     // initialize receive interrupts
@@ -93,7 +58,7 @@ impl UsbFT240 {
         // setup RXF(PE6/INT6) to trigger on falling edges
         ext_int.eicrb().modify(|_, w| w.isc6().falling_edge_of_intx());
         // clear the interrupt flag
-        ext_int.eifr().modify(|_, w| w.intf6.set_bit());
+        ext_int.eifr().modify(|_, w| w.intf().set_bit(1<<6));
         // enable interrupts
         ext_int.eimsk().modify(|_, w| w.int6.set_bit());
     }
@@ -237,31 +202,77 @@ impl UsbFT240 {
 }
 
 
+static TX_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+static TX_LEN: AtomicU8 = AtomicU8::new(0); // This is your "remaining bytes" counter
+static ACTIVE_TRANSFER: SyncUnsafeCell<Option<BufferHandle>> = SyncUnsafeCell::new(None);
+
+impl Driver for UsbFT240{
+    // return the state of the sense pin 
+    fn connected(&self) -> bool {
+        self.sense.is_high()
+    }
+
+
+    fn tx_submit(&self, buffer_handle: BufferHandle, length: u8) {
+        // wait for the TXE pin to go low
+        while !self.txe.is_low(){}
+
+        let data = avr_device::interrupt::free(|_cs| {
+            // get the pointer to the data
+            let ptr = buffer_handle.slice.as_ptr() as *mut u8;
+            let data = unsafe{*ptr};
+
+            let ptr = unsafe{ ptr.add(1)};
+            let len = length+1;
+
+            
+            // 1. Point the ISR to the data
+            TX_PTR.store(ptr, Ordering::SeqCst);
+            TX_LEN.store(len, Ordering::SeqCst);
+
+          
+            // 2. Give ownership of the handle to the static slot
+            unsafe {
+                *ACTIVE_TRANSFER.get() = Some(buffer_handle);
+            }
+
+            // initialize external interrupts
+            let ext_int = unsafe { &*self.ext_int_ptr };
+            // setup TXE(PE5/INT5) to trigger on falling edges
+            ext_int.eicrb().modify(|_, w| w.isc5().falling_edge_of_intx());
+            // clear the INT5 interrupt flags by writing it to true
+            ext_int.eifr().modify(|_, w| w.intf5().set_bit());
+            // enable interrupts so we get interrupted when the FT240 can accept the next byte
+            ext_int.eimsk().modify(|_, w| w.int5().set_bit());
+            // return the first byte
+            data
+        });
+
+        // kick off the first one
+        self.tx_byte(data);
+
+        
+    }
+}
+
+
+
 //USB tx interrupt.  I if there is data to send it will transmit the next byte to the FT240 chip otherwise it will pulse the SIWU
 //to flush the FT240s tx FIFO to the host and disable the tx interrupts.
 #[avr_device::interrupt(at90can128)]
 fn INT5() {
-    // forge a token. this is safe because we are in an ISR.
-    let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
-    // try to get the usb instance
-    if let Some(usb) = USB_INSTANCE.borrow(cs).borrow_mut().as_mut() {
-        // now get the call back to see how to proceed
-        if let Some(callback) = TX_CALLBACK.borrow(cs).get() {
-            // call the callback
-            match callback() {
-                // send the next byte
-                TxStatus::NextByte(b) => usb.tx_byte(b),
-                // flush and disable transmit interrupts
-                TxStatus::Finished => {
-                    usb.flush();
-                    usb.disable_tx();
-                    TX_CALLBACK.borrow(cs).set(None);
-                }
-            }            
-        } else {
-            usb.flush();
-            usb.disable_tx();
-        }
+    let len = TX_LEN.load(Ordering::Relaxed);
+
+    if len > 0 {
+        // ... standard pumping logic ...
+        TX_LEN.store(len - 1, Ordering::Relaxed);
+    } else {
+        // Transmission finished!
+        // disable_tx_interrupt();
+
+        // TAKE the handle out of the static. 
+        // When 'released_handle' goes out of scope here, it DROPS.
+        let _released_handle = unsafe { (*ACTIVE_TRANSFER.get()).take() };
     }
 }
 
