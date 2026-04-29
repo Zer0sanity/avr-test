@@ -1,5 +1,5 @@
 use avr_device::at90can128;
-use avr_hal_generic::port::{self, mode};
+use avr_hal_generic::port::mode;
 // this macro creates the 'Pins' struct and implements all the high-level logic.
 avr_hal_generic::impl_port_traditional! {
     enum Ports {

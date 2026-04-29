@@ -1,19 +1,20 @@
 use crate::driver::*;
-use crate::wait_pin_state::WaitPinState;
-use crate::{BufferHandle, SyncUnsafeCell, TxStatus, hal::Pin};
-use core::{
-    any::Any,
-    cell::RefCell,
-    sync::atomic::Ordering,
-    task::{Context, Poll},
-};
+use crate::{BufferHandle, SyncUnsafeCell, hal::Pin};
+use core::ops::Sub;
+use core::sync::atomic::Ordering;
 
-use avr_device::{at90can128, interrupt::Mutex};
-use avr_hal_generic::port::{self, mode};
-use portable_atomic::{AtomicPtr, AtomicU8, AtomicUsize};
+use avr_device::at90can128;
+use avr_hal_generic::port::mode;
+use portable_atomic::{AtomicPtr, AtomicU8};
 
 const TX_EXT_INT5: u8 = 1 << 5;
 const RX_EXT_INT6: u8 = 1 << 6;
+
+static USB: SyncUnsafeCell<Option<UsbFT240>> = SyncUnsafeCell::new(None);
+
+static TX_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+static TX_LEN: AtomicU8 = AtomicU8::new(0); // This is your "remaining bytes" counter
+static ACTIVE_TRANSFER: SyncUnsafeCell<Option<BufferHandle>> = SyncUnsafeCell::new(None);
 
 pub struct UsbFT240 {
     siwu: Pin<mode::Output>, //SIWU Output to tell the FT240 to flush its transmit FIFO buffer to the PC
@@ -27,7 +28,7 @@ pub struct UsbFT240 {
 }
 
 impl UsbFT240 {
-    // #[rustfmt::skip]
+    // initializes hardware, set the shared instance, and return a usb driver
     pub fn init(
         siwu: Pin<mode::Output>,
         rd: Pin<mode::Output>,
@@ -37,30 +38,36 @@ impl UsbFT240 {
         sense: Pin<mode::Input>,
         bus_ptr: *const at90can128::portc::RegisterBlock,
         ext_int_ptr: *const at90can128::exint::RegisterBlock,
-    ) -> Self {
-        // Prepare initial states: active-low pins should start High (Off)
-        let mut usb = Self {
-            siwu,
-            rd,
-            wr,
-            txe,
-            rxf,
-            sense,
-            bus_ptr,
-            ext_int_ptr,
-        };
+    ) -> UsbDriver {
+        #[rustfmt::skip]
+        // initialize the structure
+        let mut usb = Self { siwu, rd, wr, txe, rxf, sense, bus_ptr, ext_int_ptr };
 
+        // prepare initial states: active-low pins should start High (Off)
         usb.siwu.set_high();
         usb.rd.set_high();
         usb.wr.set_high();
 
+        // initialize the bus as high-impedance (Input + Pull-up)
         unsafe {
-            // initialize the bus as high-impedance (Input + Pull-up)
             let bus = &*usb.bus_ptr;
             bus.ddrc().write(|w| w.bits(0x00));
             bus.portc().write(|w| w.bits(0xFF));
         }
-        usb
+
+        // set the shared instance
+        avr_device::interrupt::free(|_| unsafe {
+            *USB.get() = Some(usb);
+        });
+
+        // a usb driver
+        UsbDriver
+    }
+
+    // return the state of the sense pin
+    #[inline(always)]
+    fn connected(&self) -> bool {
+        self.sense.is_high()
     }
 
     // enable receive interrupts
@@ -89,7 +96,7 @@ impl UsbFT240 {
         // disable interrupts
         ext_int
             .eimsk()
-            .modify(|r, w| unsafe { w.int().bits(r.int().bits() | !RX_EXT_INT6) });
+            .modify(|r, w| unsafe { w.int().bits(r.int().bits() & !RX_EXT_INT6) });
         // clear the interrupt flag
         ext_int
             .eifr()
@@ -122,7 +129,7 @@ impl UsbFT240 {
         // disable interrupts
         ext_int
             .eimsk()
-            .modify(|r, w| unsafe { w.int().bits(r.int().bits() | !TX_EXT_INT5) });
+            .modify(|r, w| unsafe { w.int().bits(r.int().bits() & !TX_EXT_INT5) });
         // clear the interrupt flag
         ext_int
             .eifr()
@@ -180,6 +187,7 @@ impl UsbFT240 {
     }
 
     // This sub will write the byte slice to the FT240 and preform a flush
+    #[inline(always)]
     pub fn write(&mut self, bytes: &[u8]) {
         // write each byte
         bytes.into_iter().for_each(|data| {
@@ -190,6 +198,7 @@ impl UsbFT240 {
     }
 
     //Routine pulses the SIWU(Send Immediate/PC Wake-up) line to flush the FT240s Tx FIFO to the host
+    #[inline(always)]
     pub fn flush(&mut self) {
         //Pull the SIWU pin low
         self.siwu.set_low();
@@ -200,44 +209,39 @@ impl UsbFT240 {
     }
 }
 
-static TX_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
-static TX_LEN: AtomicU8 = AtomicU8::new(0); // This is your "remaining bytes" counter
-static ACTIVE_TRANSFER: SyncUnsafeCell<Option<BufferHandle>> = SyncUnsafeCell::new(None);
+pub struct UsbDriver;
 
-impl Driver for UsbFT240 {
-    // return the state of the sense pin
-    fn connected(&self) -> bool {
-        self.sense.is_high()
-    }
-
+impl Driver for UsbDriver {
     fn tx_submit(&mut self, buffer_handle: BufferHandle, length: u8) {
+        // we should be awaiting an active transfer as well, but go get things going.  get the usb and wait
         // wait for the TXE pin to go low
-        while !self.txe.is_low() {}
 
-        let data = avr_device::interrupt::free(|_cs| {
-            // get the pointer to the data
-            let ptr = buffer_handle.slice.as_ptr() as *mut u8;
-            let data = unsafe { *ptr };
+        // probably check length
+        if length == 0 {
+            return;
+        }
 
-            let ptr = unsafe { ptr.add(1) };
-            let len = length + 1;
-
-            // 1. Point the ISR to the data
-            TX_PTR.store(ptr, Ordering::SeqCst);
-            TX_LEN.store(len, Ordering::SeqCst);
-
-            // 2. Give ownership of the handle to the static slot
-            unsafe {
-                *ACTIVE_TRANSFER.get() = Some(buffer_handle);
+        // get the reference
+        avr_device::interrupt::free(|_| {
+            // get at our static reference
+            if let Some(usb) = unsafe { &mut *USB.get() } {
+                // get the pointer
+                let ptr = buffer_handle.slice.as_ptr() as *mut u8;
+                // set the tx variables for isr accounting for the first byte
+                TX_PTR.store(unsafe { ptr.add(1) }, Ordering::SeqCst);
+                TX_LEN.store(length.sub(1), Ordering::SeqCst);
+                // store the buffer so we can drop it later
+                unsafe {
+                    *ACTIVE_TRANSFER.get() = Some(buffer_handle);
+                }
+                // wait for txe to go low
+                while !usb.txe.is_low() {}
+                // kick off the first one
+                usb.write_byte(unsafe { *ptr });
+                // enable the transmit interrupts
+                usb.tx_int_enable();
             }
-
-            self.tx_int_enable();
-            // return the first byte
-            data
         });
-
-        // kick off the first one
-        self.write_byte(data);
     }
 }
 
@@ -245,31 +249,35 @@ impl Driver for UsbFT240 {
 //to flush the FT240s tx FIFO to the host and disable the tx interrupts.
 #[avr_device::interrupt(at90can128)]
 fn INT5() {
-    let len = TX_LEN.load(Ordering::Relaxed);
-
-    if len > 0 {
-        // ... standard pumping logic ...
-        TX_LEN.store(len - 1, Ordering::Relaxed);
-    } else {
-        // Transmission finished!
-        // disable_tx_interrupt();
-
-        // TAKE the handle out of the static.
-        // When 'released_handle' goes out of scope here, it DROPS.
-        let _released_handle = unsafe { (*ACTIVE_TRANSFER.get()).take() };
+    // get at our static reference
+    if let Some(usb) = unsafe { &mut *USB.get() } {
+        // load the length
+        let len = TX_LEN.load(Ordering::Relaxed);
+        // if we have bytes left to send
+        if len > 0 {
+            // load the pointer
+            let ptr = TX_PTR.load(Ordering::Relaxed);
+            // write the data
+            usb.write_byte(unsafe { *ptr });
+            // increment the pointer
+            TX_PTR.store(unsafe { ptr.add(1) }, Ordering::Relaxed);
+            // decrement the length
+            TX_LEN.store(len - 1, Ordering::Relaxed);
+        } else {
+            // flush the data to the host
+            usb.flush();
+            // disable transmit interrupts
+            usb.tx_int_disable();
+            // take/drop the transfer buffer
+            let _ = unsafe { (*ACTIVE_TRANSFER.get()).take() };
+        }
     }
 }
 
 // //USB Rx Interrupt
-// #pragma vector = INT6_vect
-// __interrupt static void int6(void)
-// {
-//     //Read the data from the FT240 chip
-//     USBRxStateObject->RxData = ReceiveByteFromFT240();
-//     //Execute callback to receive the byte
-//     RxAction();
-// }
+#[avr_device::interrupt(at90can128)]
+fn INT6() {}
 
 // Local Variables:
-// jinx-local-words: #("isr nop tx usb" 4 7 (jinx--group "Suggestions from session" jinx--prefix #("07 " 0 3 (face jinx-key)) jinx--suffix nil))
+// jinx-local-words: "isr nop tx txe usb"
 // End:

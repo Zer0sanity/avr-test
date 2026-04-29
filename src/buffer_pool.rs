@@ -3,7 +3,6 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
-use avr_device::at90can128;
 pub struct Buffer {
     data: [u8; 64],
     in_use: bool,
@@ -62,7 +61,7 @@ impl BufferHandle {
 
 impl Drop for BufferHandle {
     fn drop(&mut self) {
-        avr_device::interrupt::free(|_cs| unsafe {
+        avr_device::interrupt::free(|_| {
             let buffer = unsafe { &mut *BUFFER_POOL[self.index as usize].get() };
             buffer.in_use = false;
         });

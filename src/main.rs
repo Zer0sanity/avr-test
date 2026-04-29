@@ -4,8 +4,6 @@
 use core::panic::PanicInfo;
 
 use avr_device::at90can128;
-use avr_hal_generic::port::{self, mode};
-use hal::Pin;
 use hal::Pins;
 pub mod driver;
 pub mod executor;
@@ -61,28 +59,32 @@ fn main() -> ! {
     loop {}
 }
 
-pub async fn error_blink_task(mut led: LED, mut usb: UsbFT240) {
+pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
     let on_str: &'static str = "ON\r\n";
-    let off_str: &'static str = "OFF\r\n";
+    let off_str: &'static str = "eFF\r\n";
 
     let buffer_pool = BufferPool;
-    let hi = buffer_pool.get_buffer();
+
+    let mut counter: u16 = 0;
 
     led.on();
 
     loop {
+        counter = counter.wrapping_add(1);
+        let buffer = buffer_pool.get_buffer().unwrap();
         if led.is_on() {
             led.off();
-            usb.write(off_str.as_bytes());
+            buffer.slice[..5].copy_from_slice(off_str.as_bytes());
+            usb.tx_submit(buffer, 5);
         } else {
             led.on();
-            usb.write(on_str.as_bytes());
+            buffer.slice[..4].copy_from_slice(on_str.as_bytes());
+            usb.tx_submit(buffer, 4);
         }
         Timer::delay(250).await;
     }
 }
 
-// pub async fn can_blink_task(mut led: Pin<mode::Output, PB7>, usb: &UsbFT240<'_>) {
 pub async fn can_blink_task(mut led: LED) {
     led.on();
 

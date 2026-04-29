@@ -1,6 +1,5 @@
 use crate::hal::Pin;
-use avr_device::at90can128;
-use avr_hal_generic::port::{self, mode};
+use avr_hal_generic::port::mode;
 
 pub struct LED {
     pin: Pin<mode::Output>,
