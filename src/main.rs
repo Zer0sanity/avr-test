@@ -1,7 +1,8 @@
 #![no_std]
 #![no_main]
 #![feature(abi_avr_interrupt)]
-use core::panic::PanicInfo;
+#![feature(sync_unsafe_cell)]
+use core::{fmt::Write, panic::PanicInfo};
 
 use avr_device::at90can128;
 use hal::Pins;
@@ -60,9 +61,6 @@ fn main() -> ! {
 }
 
 pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
-    let on_str: &'static str = "ON\r\n";
-    let off_str: &'static str = "eFF\r\n";
-
     let buffer_pool = BufferPool;
 
     let mut counter: u16 = 0;
@@ -71,15 +69,15 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
 
     loop {
         counter = counter.wrapping_add(1);
-        let buffer = buffer_pool.get_buffer().unwrap();
+        let mut buffer = buffer_pool.get_buffer().unwrap();
         if led.is_on() {
             led.off();
-            buffer.slice[..5].copy_from_slice(off_str.as_bytes());
-            usb.tx_submit(buffer, 5);
+            _ = write!(buffer, "OFF: {}\r\n", counter);
+            usb.tx_submit(buffer);
         } else {
             led.on();
-            buffer.slice[..4].copy_from_slice(on_str.as_bytes());
-            usb.tx_submit(buffer, 4);
+            _ = write!(buffer, "ON: {}\r\n", counter);
+            usb.tx_submit(buffer);
         }
         Timer::delay(250).await;
     }

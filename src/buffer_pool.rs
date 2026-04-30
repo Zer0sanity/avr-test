@@ -1,24 +1,12 @@
 use core::{
-    cell::UnsafeCell,
+    cell::SyncUnsafeCell,
+    fmt::{self, Write},
     ops::{Deref, DerefMut},
 };
 
 pub struct Buffer {
     data: [u8; 64],
     in_use: bool,
-}
-
-// wrapper for unsafe cell since it doesn't implement sync
-pub struct SyncUnsafeCell<T>(UnsafeCell<T>);
-unsafe impl<T> Sync for SyncUnsafeCell<T> {}
-
-impl<T> SyncUnsafeCell<T> {
-    pub const fn new(value: T) -> Self {
-        Self(UnsafeCell::new(value))
-    }
-    pub fn get(&self) -> *mut T {
-        self.0.get()
-    }
 }
 
 #[rustfmt::skip]
@@ -51,11 +39,33 @@ impl BufferPool {
 pub struct BufferHandle {
     index: u8,
     pub slice: &'static mut [u8],
+    write_pos: u8,
 }
 
 impl BufferHandle {
+    #[rustfmt::skip]
     pub fn new(index: u8, slice: &'static mut [u8]) -> Self {
-        Self { index, slice }
+        Self { index, slice, write_pos: 0 }
+    }
+
+    pub fn length(&self) -> u8 {
+        self.write_pos
+    }
+}
+
+impl Write for BufferHandle {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let bytes = s.as_bytes();
+        let len = bytes.len();
+        let write_pos = self.write_pos as usize;
+
+        if write_pos + len > self.slice.len() {
+            return Err(fmt::Error);
+        }
+
+        self.slice[write_pos..write_pos + len].copy_from_slice(bytes);
+        self.write_pos = write_pos as u8 + len as u8;
+        Ok(())
     }
 }
 

@@ -1,0 +1,80 @@
+Yes, there is! You can use core::ptr::read_volatile.
+In Rust, read_volatile is the equivalent of a pointer dereference in C where the pointer is marked volatile (e.g., *(volatile uint8_t*)ptr). This tells the compiler that the value can change at any time (due to hardware) and that the read must not be optimized away or reordered.
+## The "Real Men" Read/Write Pair
+Since you are storing bus_ptr as a pointer to a RegisterBlock, you just need to offset it to the specific register or cast it. On the AT90CAN128, the PIN, DDR, and PORT registers are usually contiguous.
+For Port C:
+
+* PINC (Read) is at the base address.
+* DDRC (Direction) is base + 1.
+* PORTC (Write) is base + 2.
+
+// To Read (Equivalent to PINC)let data = unsafe { core::ptr::read_volatile(self.bus_ptr as *const u8) };
+// To Write (Equivalent to PORTC)unsafe { core::ptr::write_volatile((self.bus_ptr as *mut u8).add(2), data) };
+
+## Why use this over the PAC?
+The PAC (bus.portc().write(...)) generates the same assembly eventually, but it often includes:
+
+   1. Closures: Passing a lambda |w| w.bits(data) can sometimes hinder the optimizer on AVR if LTO isn't aggressive.
+   2. Safety checks: It ensures you don't write to reserved bits.
+
+By using read_volatile, you are stripping all the "guardrails" and talking directly to the silicon. This will definitely help keep that program memory size down, as you're bypassing the types and methods associated with the PORTC struct.
+## A Quick Tip on PIN vs PORT
+When reading the actual pins of the FT240, make sure you are reading from the PIN register (input) and not the PORT register (the output latch). In your previous code, you were using bus.pinc().read().bits(), which was correct. Using read_volatile on the base address of the Port C block will give you exactly that.
+How is the circular buffer integration coming along—are you going to use a fixed-size array or a crate like heapless?
+
+Integrating async/await on an 8-bit AVR like the AT90CAN128 is an ambitious and awesome move. In the Rust ecosystem, this usually means using Embassy, which is designed for exactly what you're describing: avoiding blocking while waiting for hardware or buffers.
+Here is how you can map your plan to an async architecture:
+1. The Buffer Pool & "Backpressure"
+If you use a Buffer Pool, your request_buffer().await would be a classic Future.
+
+    If the pool is empty, the task "yields" control.
+    When the ISR or another task frees a buffer, it wakes the pending task.
+    This is much more efficient than C-style while(pool_empty); because the CPU can actually go to sleep or run your CAN bus logic while waiting for USB memory.
+
+2. Async Transmit (No more while !txe.is_low())
+Instead of a busy-wait, your write function becomes async:
+rust
+
+pub async fn write_async(&mut self, buffer: BufferHandle) {
+    // 1. Wait for TXE to be ready (async check)
+    // 2. Setup ISR state
+    // 3. Kick off first byte
+    // 4. .await a "Signal" or "Notification" that the ISR is finished
+}
+
+Use code with caution.
+In the ISR, once the length hits 0, you would call .signal() on a global Signal object. This wakes up the write_async task to return or drop the BufferHandle.
+3. The "Two Tasks Sending" Problem
+To prevent two tasks from stepping on each other, you don't use a Mutex in the C-sense (which blocks). You use an Async Mutex.
+
+    If Task A is sending a 512-byte packet, Task B's .lock().await will simply pause Task B.
+    The executor handles the queueing. This ensures your USB protocol stays atomic and packets don't get interleaved.
+
+4. Receive: Circular Buffer vs. Task Polling
+For the receive side, the most efficient async pattern is:
+
+    ISR: Pulls bytes from FT240 into a heapless::spsc::Queue (Very fast, non-blocking).
+    Processor Task:
+    rust
+
+    loop {
+        if let Some(byte) = queue.dequeue() {
+            // Process byte into your packet buffer
+            if packet_complete {
+                process_packet(current_buffer).await;
+            }
+        } else {
+            // No data? Yield until the ISR wakes us up
+            Timer::after(Duration::from_millis(1)).await; // Or use a Signal
+        }
+    }
+
+    Use code with caution.
+
+The "Overhead" Warning
+Since you were already surprised by the 3KB write! bloat:
+
+    Async Executors (like Embassy) are very lean, but they do use some Flash for the "Waker" logic and the state machines the compiler generates for your async functions.
+    On an AT90CAN128, you have plenty of Flash (128KB), but SRAM (4KB) is your bottleneck. Every async task has a "State" that lives in SRAM. Keep your task count low and your buffers sized carefully!
+
+Are you planning to use a specific executor like Embassy, or were you thinking of rolling a simple manual Future implementation for the buffer pool?
