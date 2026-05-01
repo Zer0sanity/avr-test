@@ -61,15 +61,13 @@ fn main() -> ! {
 }
 
 pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
-    let buffer_pool = BufferPool;
-
     let mut counter: u16 = 0;
 
     led.on();
 
     loop {
         counter = counter.wrapping_add(1);
-        let mut buffer = buffer_pool.get_buffer().unwrap();
+        let mut buffer = BufferPool::get_buffer().await;
         if led.is_on() {
             led.off();
             _ = write!(buffer, "OFF: {}\r\n", counter);

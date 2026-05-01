@@ -2,6 +2,8 @@ use core::{
     cell::SyncUnsafeCell,
     fmt::{self, Write},
     ops::{Deref, DerefMut},
+    pin::Pin,
+    task::{Context, Poll},
 };
 
 pub struct Buffer {
@@ -12,18 +14,36 @@ pub struct Buffer {
 #[rustfmt::skip]
 static BUFFER_POOL: [SyncUnsafeCell<Buffer>; 4] = [
     SyncUnsafeCell::new(Buffer { data: [0; 64], in_use: false }),
-    SyncUnsafeCell::new(Buffer { data: [0; 64], in_use: false }),
-    SyncUnsafeCell::new(Buffer { data: [0; 64], in_use: false }),
-    SyncUnsafeCell::new(Buffer { data: [0; 64], in_use: false }),
+    SyncUnsafeCell::new(Buffer { data: [0; 64], in_use: true }),
+    SyncUnsafeCell::new(Buffer { data: [0; 64], in_use: true }),
+    SyncUnsafeCell::new(Buffer { data: [0; 64], in_use: true }),
 ];
 
 pub struct BufferPool;
 
 impl BufferPool {
-    pub fn get_buffer(&self) -> Option<BufferHandle> {
+    pub fn get_buffer() -> BufferRequest {
+        BufferRequest
+    }
+
+    pub fn release_buffer(index: u8) {
+        if index as usize <= BUFFER_POOL.len() {
+            avr_device::interrupt::free(|_| {
+                let buffer = unsafe { &mut *BUFFER_POOL[index as usize].get() };
+                buffer.in_use = false;
+            });
+        }
+    }
+}
+
+pub struct BufferRequest;
+
+impl core::future::Future for BufferRequest {
+    type Output = BufferHandle;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         avr_device::interrupt::free(|_cs| {
-            // add enumerate to get the index
-            BUFFER_POOL.iter().enumerate().find_map(|(index, cell)| {
+            let buffer_handle = BUFFER_POOL.iter().enumerate().find_map(|(index, cell)| {
                 let buffer = unsafe { &mut *cell.get() };
                 if buffer.in_use {
                     None
@@ -31,7 +51,12 @@ impl BufferPool {
                     buffer.in_use = true;
                     Some(BufferHandle::new(index as u8, &mut buffer.data))
                 }
-            })
+            });
+
+            match buffer_handle {
+                Some(buffer) => Poll::Ready(buffer),
+                None => Poll::Pending,
+            }
         })
     }
 }
@@ -71,10 +96,7 @@ impl Write for BufferHandle {
 
 impl Drop for BufferHandle {
     fn drop(&mut self) {
-        avr_device::interrupt::free(|_| {
-            let buffer = unsafe { &mut *BUFFER_POOL[self.index as usize].get() };
-            buffer.in_use = false;
-        });
+        BufferPool::release_buffer(self.index);
     }
 }
 
