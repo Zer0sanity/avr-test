@@ -1,6 +1,6 @@
 use crate::driver::*;
 use crate::{BufferHandle, hal::Pin};
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 
 use avr_device::at90can128;
 use avr_device::interrupt::Mutex;
@@ -153,9 +153,6 @@ impl UsbFT240 {
             // Reconfigure the data bus pins as inputs with pull-ups enabled
             bus.ddrc().write(|w| w.bits(0x00));
             bus.portc().write(|w| w.bits(0xff));
-
-            // try these for writes
-            // unsafe { core::ptr::write_volatile(self.bus_ptr as *mut u8, data) };
         }
     }
 
@@ -182,9 +179,6 @@ impl UsbFT240 {
             bus.portc().write(|w| w.bits(0xff));
             //Return the value
             data
-
-            // try these for reads
-            // let data = unsafe { core::ptr::read_volatile(self.bus_ptr as *const u8) };
         }
     }
 
@@ -211,8 +205,7 @@ impl UsbFT240 {
     }
 }
 
-static TX_STATE: Mutex<Cell<Option<Transfer>>> = Mutex::new(Cell::new(None));
-static ACTIVE_HANDLE: Mutex<Cell<Option<BufferHandle>>> = Mutex::new(Cell::new(None));
+static TX_STATE: Mutex<RefCell<Option<Transfer>>> = Mutex::new(RefCell::new(None));
 
 pub struct UsbDriver;
 
@@ -221,37 +214,30 @@ impl Driver for UsbDriver {
         // we should be awaiting an active transfer as well, but go get things going.  get the usb and wait
         // wait for the TXE pin to go low
 
-        // probably check length
-        if buffer.length() == 0 {
-            return;
-        }
-
         // get the reference
         avr_device::interrupt::free(|cs| {
             // get at our static reference
             if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
-                // get the pointer
-                let ptr = buffer.slice.as_ptr() as *mut u8;
-
                 // Simple busy check
-                if TX_STATE.borrow(cs).get().is_some() {
-                    // Either return an error or panic - the driver is already busy!
+                if TX_STATE.borrow(cs).borrow().is_some() {
                     return;
                 }
                 // setup the tx state
-                TX_STATE.borrow(cs).set(Some(Transfer {
-                    data_ptr: unsafe { ptr.add(1) },
-                    length: buffer.length() - 1,
-                }));
-
-                // store the buffer so we can drop it later
-                ACTIVE_HANDLE.borrow(cs).set(Some(buffer));
+                let mut state = Transfer::new(buffer);
                 // wait for txe to go low
                 while !usb.txe.is_low() {}
-                // enable the transmit interrupts
-                usb.tx_int_enable();
-                // kick off the first one
-                usb.write_byte(unsafe { *ptr });
+                // get the first byte and start the transfer
+                match state.next() {
+                    None => usb.tx_int_disable(),
+                    Some(byte) => {
+                        // set the state
+                        *TX_STATE.borrow(cs).borrow_mut() = Some(state);
+                        // enable the transmit interrupts
+                        usb.tx_int_enable();
+                        // kick off the first one
+                        usb.write_byte(byte);
+                    }
+                }
             }
         });
     }
@@ -265,27 +251,26 @@ fn INT5() {
     let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
     // get at our static reference
     if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
+        // get the next byte
+        let data = TX_STATE
+            .borrow(cs)
+            .borrow_mut()
+            .as_mut()
+            .and_then(|state| state.next());
+
         // get the tx state
-        let tx_cell = TX_STATE.borrow(cs);
-        match tx_cell.get() {
-            None | Some(Transfer { length: 0, .. }) => {
+        match data {
+            Some(byte) => {
+                // write the data
+                usb.write_byte(byte);
+            }
+            None => {
                 // flush the data to the host
                 usb.flush();
                 // disable transmit interrupts
                 usb.tx_int_disable();
                 // take/drop the transfer buffer
                 let _state = TX_STATE.borrow(cs).take();
-                let _handle = ACTIVE_HANDLE.borrow(cs).take();
-            }
-            Some(mut tx_state) => {
-                // write the data
-                usb.write_byte(unsafe { *tx_state.data_ptr });
-                // increment the pointer
-                tx_state.data_ptr = unsafe { tx_state.data_ptr.add(1) };
-                // decrement the length
-                tx_state.length -= 1;
-                // update the cell
-                tx_cell.set(Some(tx_state));
             }
         }
     }
