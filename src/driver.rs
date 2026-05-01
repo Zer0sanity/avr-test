@@ -14,7 +14,7 @@ impl Transfer {
     pub fn new(buffer: BufferHandle) -> Self {
         let iter = unsafe {
             core::mem::transmute::<core::slice::Iter<'_, u8>, core::slice::Iter<'static, u8>>(
-                buffer.slice.iter(),
+                buffer.slice[..buffer.length() as usize].iter(),
             )
         };
 
