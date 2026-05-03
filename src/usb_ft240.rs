@@ -6,6 +6,18 @@ use avr_device::at90can128;
 use avr_device::interrupt::Mutex;
 use avr_hal_generic::port::mode;
 
+// bit mask for the different usb states
+// pub mod usb_state {
+//     pub const IDLE: u8 = 1 << 0;
+//     pub const TRANSMITTING: u8 = 1 << 1;
+//     pub const WAITING_FOR_SPACE: u8 = 1 << 2;
+//     pub const SPACE_AVAILABLE: u8 = 1 << 3;
+//     pub const DATA_RECEIVED: u8 = 1 << 4;
+// }
+
+// // static state
+// static USB_STATUS: AtomicU8 = AtomicU8::new(usb_state::IDLE | usb_state::SPACE_AVAILABLE);
+
 const TX_EXT_INT5: u8 = 1 << 5;
 const RX_EXT_INT6: u8 = 1 << 6;
 
