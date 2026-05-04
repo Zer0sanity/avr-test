@@ -2,6 +2,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
+use portable_atomic::{AtomicBool, Ordering};
 
 // A simple helper to run two tasks concurrently
 pub struct Join<A, B> {
@@ -26,13 +27,24 @@ impl<A: Future<Output = ()>, B: Future<Output = ()>> Future for Join<A, B> {
     }
 }
 
-fn dummy_raw_waker() -> RawWaker {
+// global signal to tell that we have been woken
+static SIGNAL: AtomicBool = AtomicBool::new(true);
+
+// function to set the signal.  this should be called in an interrupt free context
+fn signal_wake() {
+    SIGNAL.store(true, Ordering::Relaxed);
+}
+
+fn signal_waker() -> RawWaker {
     fn no_op(_: *const ()) {}
     fn clone(_: *const ()) -> RawWaker {
-        dummy_raw_waker()
+        signal_waker()
+    }
+    fn wake(_: *const ()) {
+        signal_wake();
     }
 
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake, no_op);
     RawWaker::new(core::ptr::null(), &VTABLE)
 }
 
@@ -46,18 +58,20 @@ impl<F: Future> Executor<F> {
     }
 
     pub fn run(&mut self) {
-        let waker = unsafe { Waker::from_raw(dummy_raw_waker()) };
+        let waker = unsafe { Waker::from_raw(signal_waker()) };
         let mut cx = Context::from_waker(&waker);
-
-        // Pin the future to the stack
         let mut pinned_future = unsafe { Pin::new_unchecked(&mut self.future) };
 
         loop {
-            match pinned_future.as_mut().poll(&mut cx) {
-                Poll::Ready(_) => break, // Task finished
-                Poll::Pending => {
-                    // Optional: Put the CPU to sleep here to save power
-                    // avr_device::asm::sleep();
+            let should_poll =
+                avr_device::interrupt::free(|_| SIGNAL.swap(false, Ordering::Relaxed));
+
+            if should_poll {
+                match pinned_future.as_mut().poll(&mut cx) {
+                    Poll::Ready(_) => break, // Task finished
+                    Poll::Pending => {
+                        avr_device::asm::sleep();
+                    }
                 }
             }
         }

@@ -28,7 +28,7 @@ pub use usb_ft240::*;
 
 use crate::async_queue::AsyncQueue;
 
-static QUEUE: AsyncQueue<u8, 8, 8> = AsyncQueue::new();
+static QUEUE: AsyncQueue<u8, 8> = AsyncQueue::new();
 
 #[avr_device::entry]
 fn main() -> ! {
@@ -84,7 +84,7 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
         }
         Timer::delay(250).await;
 
-        QUEUE.push(5).await;
+        // QUEUE.push(5).await;
     }
 }
 
