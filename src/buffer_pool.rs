@@ -1,32 +1,64 @@
 use core::{
-    cell::SyncUnsafeCell,
+    cell::{RefCell, SyncUnsafeCell},
     fmt::{self, Write},
     ops::{Deref, DerefMut},
     pin::Pin,
     task::{Context, Poll},
 };
 
+use avr_device::interrupt::Mutex;
+
 use crate::async_queue::{AsyncQueue, QueueError};
 
 const NUM_BUFFERS: usize = 4;
 const BUFFER_SIZE: usize = 64;
 
-#[rustfmt::skip]
-static BUFFER_POOL: [SyncUnsafeCell<[u8; BUFFER_SIZE]>; NUM_BUFFERS] = [
-    SyncUnsafeCell::new([0; BUFFER_SIZE]),
-    SyncUnsafeCell::new([0; BUFFER_SIZE]),
-    SyncUnsafeCell::new([0; BUFFER_SIZE]),
-    SyncUnsafeCell::new([0; BUFFER_SIZE]),
-];
+static BUFFER_POOL: Mutex<RefCell<BufferPool<NUM_BUFFERS, BUFFER_SIZE>>> =
+    Mutex::new(RefCell::new(BufferPool::new()));
 
 static BUFFER_REGISTER: AsyncQueue<u8, NUM_BUFFERS> = AsyncQueue::new();
 
-pub struct BufferPool;
+struct BufferAllocator<const BUFFER_COUNT: usize> {
+    alloc_idx: u8,
+    dealloc_idx: u8,
+    free_allocations: [u8; BUFFER_COUNT],
+    count: u8,
+}
 
-impl BufferPool {
-    pub fn init() {
-        for i in 0..NUM_BUFFERS {
-            BUFFER_REGISTER.try_push(i as u8);
+impl<const BUFFER_COUNT: usize> BufferAllocator<BUFFER_COUNT> {
+    pub const fn new() -> Self {
+        let mut free = [0; BUFFER_COUNT];
+        for i in 0..BUFFER_COUNT {
+            free[i] = i as u8;
+        }
+
+        Self {
+            alloc_idx: 0,
+            dealloc_idx: 0,
+            free_allocations: free,
+            count: BUFFER_COUNT as u8,
+        }
+    }
+}
+
+pub struct BufferPool<const BUFFER_COUNT: usize, const BUFFER_CAPACITY: usize> {
+    pool: [[u8; BUFFER_CAPACITY]; BUFFER_COUNT],
+    allocator: BufferAllocator<BUFFER_COUNT>,
+    waker: Option<Waker>,
+}
+
+impl<const BUFFER_COUNT: usize, const BUFFER_CAPACITY: usize>
+    BufferPool<BUFFER_COUNT, BUFFER_CAPACITY>
+{
+    const ELEM: [u8; BUFFER_CAPACITY] = const { [0 as u8; BUFFER_CAPACITY] };
+    const INIT_POOL: [[u8; BUFFER_CAPACITY]; BUFFER_COUNT] = [Self::ELEM; BUFFER_COUNT];
+    const INIT_ALLOC: BufferAllocator<BUFFER_COUNT> = BufferAllocator::new();
+
+    pub const fn new() -> Self {
+        Self {
+            pool: Self::INIT_POOL,
+            allocator: Self::INIT_ALLOC,
+            waker: None,
         }
     }
 
@@ -41,6 +73,29 @@ impl BufferPool {
         if (index as usize) < NUM_BUFFERS {
             avr_device::interrupt::free(|cs| BUFFER_REGISTER.try_push(index));
         }
+    }
+}
+
+impl Future for BufferRequest {
+    type Output = BufferHandle;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        avr_device::interrupt::free(|_cs| {
+            let buffer_handle = BUFFER_POOL.iter().enumerate().find_map(|(index, cell)| {
+                let buffer = unsafe { &mut *cell.get() };
+                if buffer.in_use {
+                    None
+                } else {
+                    buffer.in_use = true;
+                    Some(BufferHandle::new(index as u8, &mut buffer.data))
+                }
+            });
+
+            match buffer_handle {
+                Some(buffer) => Poll::Ready(buffer),
+                None => Poll::Pending,
+            }
+        })
     }
 }
 
