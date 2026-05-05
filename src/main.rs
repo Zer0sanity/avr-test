@@ -50,6 +50,7 @@ fn main() -> ! {
     );
 
     Timer::init(&dp.TC1);
+    BufferPool::init();
 
     let combined_future = Join {
         a: error_blink_task(err_led, usb),
@@ -72,7 +73,10 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
 
     loop {
         counter = counter.wrapping_add(1);
-        let mut buffer = BufferPool::get_buffer().await;
+        
+        let mut handle = BufferPool::get_buffer().await;
+        let mut buffer = handle.unwrap();
+
         if led.is_on() {
             led.off();
             _ = write!(buffer, "OFF: {}\r\n", counter);

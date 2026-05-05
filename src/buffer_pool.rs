@@ -6,58 +6,41 @@ use core::{
     task::{Context, Poll},
 };
 
-pub struct Buffer {
-    data: [u8; 64],
-    in_use: bool,
-}
+use crate::async_queue::{AsyncQueue, QueueError};
+
+const NUM_BUFFERS: usize = 4;
+const BUFFER_SIZE: usize = 64;
 
 #[rustfmt::skip]
-static BUFFER_POOL: [SyncUnsafeCell<Buffer>; 4] = [
-    SyncUnsafeCell::new(Buffer { data: [0; 64], in_use: false }),
-    SyncUnsafeCell::new(Buffer { data: [0; 64], in_use: true }),
-    SyncUnsafeCell::new(Buffer { data: [0; 64], in_use: true }),
-    SyncUnsafeCell::new(Buffer { data: [0; 64], in_use: true }),
+static BUFFER_POOL: [SyncUnsafeCell<[u8; BUFFER_SIZE]>; NUM_BUFFERS] = [
+    SyncUnsafeCell::new([0; BUFFER_SIZE]),
+    SyncUnsafeCell::new([0; BUFFER_SIZE]),
+    SyncUnsafeCell::new([0; BUFFER_SIZE]),
+    SyncUnsafeCell::new([0; BUFFER_SIZE]),
 ];
+
+static BUFFER_REGISTER: AsyncQueue<u8, NUM_BUFFERS> = AsyncQueue::new();
 
 pub struct BufferPool;
 
 impl BufferPool {
-    pub fn get_buffer() -> BufferRequest {
-        BufferRequest
+    pub fn init() {
+        for i in 0..NUM_BUFFERS {
+            BUFFER_REGISTER.try_push(i as u8);
+        }
+    }
+
+    pub async fn get_buffer() -> Result<BufferHandle, QueueError> {
+        // let index = BUFFER_REGISTER.pop().await?;
+
+        let data = avr_device::interrupt::free(|_| unsafe { &mut *BUFFER_POOL[0 as usize].get() });
+        Ok(BufferHandle::new(0, data))
     }
 
     pub fn release_buffer(index: u8) {
-        if index as usize <= BUFFER_POOL.len() {
-            avr_device::interrupt::free(|_| {
-                let buffer = unsafe { &mut *BUFFER_POOL[index as usize].get() };
-                buffer.in_use = false;
-            });
+        if (index as usize) < NUM_BUFFERS {
+            avr_device::interrupt::free(|cs| BUFFER_REGISTER.try_push(index));
         }
-    }
-}
-
-pub struct BufferRequest;
-
-impl core::future::Future for BufferRequest {
-    type Output = BufferHandle;
-
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        avr_device::interrupt::free(|_cs| {
-            let buffer_handle = BUFFER_POOL.iter().enumerate().find_map(|(index, cell)| {
-                let buffer = unsafe { &mut *cell.get() };
-                if buffer.in_use {
-                    None
-                } else {
-                    buffer.in_use = true;
-                    Some(BufferHandle::new(index as u8, &mut buffer.data))
-                }
-            });
-
-            match buffer_handle {
-                Some(buffer) => Poll::Ready(buffer),
-                None => Poll::Pending,
-            }
-        })
     }
 }
 

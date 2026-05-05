@@ -49,7 +49,7 @@ impl<T, const CAPACITY: usize> AsyncQueueInner<T, CAPACITY> {
     }
 
     pub fn has_space(&self) -> bool {
-        self.count < CAPACITY as u8
+        self.count < (CAPACITY as u8)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -62,15 +62,13 @@ impl<T, const CAPACITY: usize> AsyncQueueInner<T, CAPACITY> {
         self.count += 1;
     }
 
-    pub fn try_push(&mut self, item: &mut Option<T>) -> Result<(), QueueError> {
+    pub fn try_push(&mut self, item: T) -> Result<(), QueueError> {
         match self.has_space() {
             true => Err(QueueError::Full),
             _ => {
                 _ = self.waker.take().map(|w| w.wake());
-                match item.take() {
-                    Some(t) => Ok(self.push(t)),
-                    None => Err(QueueError::NoItem),
-                }
+                self.push(item);
+                Ok(())
             }
         }
     }
@@ -113,6 +111,18 @@ impl<T, const CAPACITY: usize> AsyncQueue<T, CAPACITY> {
             item: Some(item),
         }
     }
+
+    pub fn pop(&self) -> PopFuture<'_, T, CAPACITY> {
+        PopFuture { queue: self }
+    }
+
+    pub fn try_push(&self, item: T) -> Result<(), QueueError> {
+        avr_device::interrupt::free(|cs| self.inner.borrow(cs).borrow_mut().try_push(item))
+    }
+
+    pub fn try_pop(&self) -> Result<T, QueueError> {
+        avr_device::interrupt::free(|cs| self.inner.borrow(cs).borrow_mut().try_pop())
+    }
 }
 
 pub struct PushFuture<'a, T, const CAPACITY: usize> {
@@ -130,12 +140,34 @@ impl<'a, T, const CAPACITY: usize> Future for PushFuture<'a, T, CAPACITY> {
             match queue.has_space() {
                 true => {
                     let mut item = unsafe { self.get_unchecked_mut().item.take() };
-                    Poll::Ready(queue.try_push(&mut item))
+
+                    Poll::Ready(queue.try_push(item.unwrap()))
                 }
                 _ => {
                     queue.waker = Some(cx.waker().clone());
                     Poll::Pending
                 }
+            }
+        })
+    }
+}
+
+pub struct PopFuture<'a, T, const CAPACITY: usize> {
+    queue: &'a AsyncQueue<T, CAPACITY>,
+}
+
+impl<'a, T, const CAPACITY: usize> Future for PopFuture<'a, T, CAPACITY> {
+    type Output = Result<T, QueueError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        avr_device::interrupt::free(|cs| {
+            let mut queue = self.queue.inner.borrow(cs).borrow_mut();
+            match queue.is_empty() {
+                true => {
+                    queue.waker = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+                _ => Poll::Ready(queue.try_pop()),
             }
         })
     }
