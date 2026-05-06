@@ -288,9 +288,47 @@ fn INT5() {
     }
 }
 
+static RX_STATE: Mutex<RefCell<Option<Transfer>>> = Mutex::new(RefCell::new(None));
+
 // //USB Rx Interrupt
 #[avr_device::interrupt(at90can128)]
-fn INT6() {}
+fn INT6() {
+    // Forge a token. This is safe ONLY because we are in an ISR.
+    let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
+    // get at our static reference
+    if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
+        // get the transfer to write the byte into
+        // if the transfer doesn't exit, we can disable the rx interrupt and leave the byte there
+        // otherwise read the byte
+        // write it to the transfer
+        // figure out the next steps
+
+        // get the next byte
+        let data = RX_STATE
+            .borrow(cs)
+            .borrow_mut()
+            .as_mut()
+            .and_then(|state| state.next());
+
+        // read the byte
+
+        // get the tx state
+        match data {
+            Some(byte) => {
+                // write the data
+                usb.write_byte(byte);
+            }
+            None => {
+                // flush the data to the host
+                usb.flush();
+                // disable transmit interrupts
+                usb.tx_int_disable();
+                // take/drop the transfer buffer
+                let _state = TX_STATE.borrow(cs).take();
+            }
+        }
+    }
+}
 
 // Local Variables:
 // jinx-local-words: "isr nop tx txe usb"
