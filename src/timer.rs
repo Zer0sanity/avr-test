@@ -1,10 +1,8 @@
+use avr_device::at90can128;
 use core::{
     pin::Pin,
     task::{Context, Poll, Waker},
 };
-use portable_atomic::{AtomicU8, Ordering};
-
-use avr_device::at90can128;
 
 use avr_device::interrupt::Mutex;
 use core::cell::Cell;

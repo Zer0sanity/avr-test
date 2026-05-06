@@ -1,43 +1,105 @@
 use core::{
-    cell::{RefCell, SyncUnsafeCell},
+    cell::RefCell,
+    error::Error,
     fmt::{self, Write},
     ops::{Deref, DerefMut},
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 
 use avr_device::interrupt::Mutex;
 
-use crate::async_queue::{AsyncQueue, QueueError};
-
 const NUM_BUFFERS: usize = 4;
 const BUFFER_SIZE: usize = 64;
+
+#[derive(Debug)]
+pub enum BufferError {
+    PoolFull,
+    PoolEmpty,
+    AlreadyDeallocated,
+    InvalidIndex,
+}
+
+impl fmt::Display for BufferError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Custom error occurred")
+    }
+}
+
+impl Error for BufferError {}
+
+type Result<T> = core::result::Result<T, BufferError>;
 
 static BUFFER_POOL: Mutex<RefCell<BufferPool<NUM_BUFFERS, BUFFER_SIZE>>> =
     Mutex::new(RefCell::new(BufferPool::new()));
 
-static BUFFER_REGISTER: AsyncQueue<u8, NUM_BUFFERS> = AsyncQueue::new();
-
 struct BufferAllocator<const BUFFER_COUNT: usize> {
     alloc_idx: u8,
     dealloc_idx: u8,
-    free_allocations: [u8; BUFFER_COUNT],
+    allocations: [u8; BUFFER_COUNT],
     count: u8,
+    in_use_mask: u8,
 }
 
 impl<const BUFFER_COUNT: usize> BufferAllocator<BUFFER_COUNT> {
     pub const fn new() -> Self {
+        let mut i = 0;
         let mut free = [0; BUFFER_COUNT];
-        for i in 0..BUFFER_COUNT {
+        while i < BUFFER_COUNT {
             free[i] = i as u8;
+            i += 1;
         }
 
         Self {
             alloc_idx: 0,
             dealloc_idx: 0,
-            free_allocations: free,
+            allocations: free,
             count: BUFFER_COUNT as u8,
+            in_use_mask: 0,
         }
+    }
+
+    pub fn try_alloc(&mut self) -> Result<u8> {
+        // do we have buffers any to give out
+        if self.count == 0 {
+            return Err(BufferError::PoolEmpty);
+        }
+        // grab the buffer index
+        let index = self.allocations[self.alloc_idx as usize];
+        // increment the allocation index
+        self.alloc_idx = (self.alloc_idx + 1) % BUFFER_COUNT as u8;
+        // decrement the count
+        self.count -= 1;
+        // update the in_use_mask
+        self.in_use_mask |= 1 << index;
+        // return
+        Ok(index)
+    }
+
+    pub fn try_dealloc(&mut self, index: u8) -> Result<()> {
+        // do we have buffers any to give out
+        if self.count == BUFFER_COUNT as u8 {
+            return Err(BufferError::PoolFull);
+        }
+        // is the index valid
+        if index >= BUFFER_COUNT as u8 {
+            return Err(BufferError::InvalidIndex);
+        }
+        // is the index allocated
+        if (self.in_use_mask & (1 << index)) == 0 {
+            return Err(BufferError::AlreadyDeallocated);
+        }
+
+        // add the index back into the allocations free array
+        self.allocations[self.dealloc_idx as usize] = index;
+        // increment the deallocation index
+        self.dealloc_idx = (self.dealloc_idx + 1) % BUFFER_COUNT as u8;
+        // increment the count
+        self.count += 1;
+        // clear the in_use_mask
+        self.in_use_mask &= !(1 << index);
+        // return
+        Ok(())
     }
 }
 
@@ -61,40 +123,59 @@ impl<const BUFFER_COUNT: usize, const BUFFER_CAPACITY: usize>
             waker: None,
         }
     }
+}
 
-    pub async fn get_buffer() -> Result<BufferHandle, QueueError> {
-        // let index = BUFFER_REGISTER.pop().await?;
+pub struct BufferRequest;
 
-        let data = avr_device::interrupt::free(|_| unsafe { &mut *BUFFER_POOL[0 as usize].get() });
-        Ok(BufferHandle::new(0, data))
-    }
-
-    pub fn release_buffer(index: u8) {
-        if (index as usize) < NUM_BUFFERS {
-            avr_device::interrupt::free(|cs| BUFFER_REGISTER.try_push(index));
-        }
+impl BufferRequest {
+    pub fn release_buffer(index: u8) -> Result<()> {
+        avr_device::interrupt::free(|cs| {
+            // get the pool
+            let mut buffer_pool = BUFFER_POOL.borrow(cs).borrow_mut();
+            // try to deallocate buffer
+            let result = buffer_pool.allocator.try_dealloc(index);
+            // if the result was OK wake the waker
+            _ = result
+                .as_ref()
+                .map(|_| buffer_pool.waker.take().map(|w| w.wake()));
+            // return
+            result
+        })
     }
 }
 
 impl Future for BufferRequest {
     type Output = BufferHandle;
 
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        avr_device::interrupt::free(|_cs| {
-            let buffer_handle = BUFFER_POOL.iter().enumerate().find_map(|(index, cell)| {
-                let buffer = unsafe { &mut *cell.get() };
-                if buffer.in_use {
-                    None
-                } else {
-                    buffer.in_use = true;
-                    Some(BufferHandle::new(index as u8, &mut buffer.data))
-                }
-            });
-
-            match buffer_handle {
-                Some(buffer) => Poll::Ready(buffer),
-                None => Poll::Pending,
-            }
+    #[rustfmt::skip]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        avr_device::interrupt::free(|cs| {
+            // get the pool
+            let mut buffer_pool = BUFFER_POOL.borrow(cs).borrow_mut();
+            // try to allocate a buffer
+            buffer_pool
+                .allocator
+                .try_alloc()
+                .map(|indx| {
+                    // some trickery to get a mutable slice
+                    let ptr = buffer_pool.pool[indx as usize].as_mut_ptr();
+                    let len = buffer_pool.pool[indx as usize].len();
+                    let buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
+                    // poll ready
+                    Poll::Ready(BufferHandle::new(indx, buf))
+                })
+                .unwrap_or_else(|_| {
+                    // set waker
+                    if buffer_pool
+                        .waker
+                        .as_ref()
+                        .map_or(true, |w| !w.will_wake(cx.waker()))
+                    {
+                        buffer_pool.waker = Some(cx.waker().clone());
+                    }
+                    // poll pending
+                    Poll::Pending
+                })
         })
     }
 }
@@ -134,7 +215,7 @@ impl Write for BufferHandle {
 
 impl Drop for BufferHandle {
     fn drop(&mut self) {
-        BufferPool::release_buffer(self.index);
+        _ = BufferRequest::release_buffer(self.index);
     }
 }
 

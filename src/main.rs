@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 #![feature(abi_avr_interrupt)]
-#![feature(sync_unsafe_cell)]
 use core::{fmt::Write, panic::PanicInfo};
 
 use avr_device::at90can128;
@@ -50,7 +49,6 @@ fn main() -> ! {
     );
 
     Timer::init(&dp.TC1);
-    BufferPool::init();
 
     let combined_future = Join {
         a: error_blink_task(err_led, usb),
@@ -73,18 +71,17 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
 
     loop {
         counter = counter.wrapping_add(1);
-        
-        let mut handle = BufferPool::get_buffer().await;
-        let mut buffer = handle.unwrap();
+
+        let mut handle = BufferRequest.await;
 
         if led.is_on() {
             led.off();
-            _ = write!(buffer, "OFF: {}\r\n", counter);
-            usb.tx_submit(buffer);
+            _ = write!(handle, "OFF: {}\r\n", counter);
+            usb.tx_submit(handle);
         } else {
             led.on();
-            _ = write!(buffer, "ON: {}\r\n", counter);
-            usb.tx_submit(buffer);
+            _ = write!(handle, "ON: {}\r\n", counter);
+            usb.tx_submit(handle);
         }
         Timer::delay(250).await;
 
