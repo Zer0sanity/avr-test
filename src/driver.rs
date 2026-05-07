@@ -29,20 +29,21 @@ impl Transfer {
 
     pub fn write_next(&mut self, byte: u8) -> Result<bool, ()> {
         if let Some(slot) = self.iter.next() {
-            *slot = byte;
-            self.buffer.write_pos += 1; // Keep handle in sync
+            Ok(true)
+            // *slot = byte;
+            // self.buffer.write_pos += 1; // Keep handle in sync
 
-            // Logic to determine if packet is done (e.g., CRC check, EOP char, or Full)
-            Ok(self.is_packet_complete(byte))
+            // // Logic to determine if packet is done (e.g., CRC check, EOP char, or Full)
+            // Ok(self.is_packet_complete(byte))
         } else {
             Err(()) // Buffer overflow
         }
     }
 
-    fn is_packet_complete(&self, last_byte: u8) -> bool {
-        // Your custom logic here
-        last_byte == b'\n' || self.buffer.write_pos == self.buffer.slice.len() as u8
-    }
+    // fn is_packet_complete(&self, last_byte: u8) -> bool {
+    //     // Your custom logic here
+    //     last_byte == b'\n' || self.buffer.write_pos == self.buffer.slice.len() as u8
+    // }
 }
 
 impl Iterator for Transfer {
@@ -55,4 +56,5 @@ impl Iterator for Transfer {
 
 pub trait Driver {
     fn tx_submit(&mut self, buffer_handle: BufferHandle);
+    fn rx_submit(&mut self, buffer_handle: BufferHandle);
 }

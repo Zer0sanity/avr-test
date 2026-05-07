@@ -218,6 +218,7 @@ impl UsbFT240 {
 }
 
 static TX_STATE: Mutex<RefCell<Option<Transfer>>> = Mutex::new(RefCell::new(None));
+static RX_STATE: Mutex<RefCell<Option<Transfer>>> = Mutex::new(RefCell::new(None));
 
 pub struct UsbDriver;
 
@@ -226,9 +227,9 @@ impl Driver for UsbDriver {
         // we should be awaiting an active transfer as well, but go get things going.  get the usb and wait
         // wait for the TXE pin to go low
 
-        // get the reference
+        // go interrupt free while updating state
         avr_device::interrupt::free(|cs| {
-            // get at our static reference
+            // get the usb reference
             if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
                 // Simple busy check
                 if TX_STATE.borrow(cs).borrow().is_some() {
@@ -250,6 +251,28 @@ impl Driver for UsbDriver {
                         usb.write_byte(byte);
                     }
                 }
+            }
+        });
+    }
+
+    fn rx_submit(&mut self, buffer: BufferHandle) {
+        // we should be awaiting an active transfer as well, but go get things going.  get the usb and wait
+        // and set the state if its not already set
+
+        // go interrupt free while updating state
+        avr_device::interrupt::free(|cs| {
+            // get the usb reference
+            if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
+                // Simple busy check
+                if RX_STATE.borrow(cs).borrow().is_some() {
+                    return;
+                }
+                // setup the tx state
+                let mut state = Transfer::new(buffer);
+                // set the state
+                *RX_STATE.borrow(cs).borrow_mut() = Some(state);
+                // enable rx interrupts
+                usb.rx_int_enable();
             }
         });
     }
@@ -287,8 +310,6 @@ fn INT5() {
         }
     }
 }
-
-static RX_STATE: Mutex<RefCell<Option<Transfer>>> = Mutex::new(RefCell::new(None));
 
 // //USB Rx Interrupt
 #[avr_device::interrupt(at90can128)]
