@@ -1,4 +1,7 @@
-use core::slice;
+use core::{
+    mem::transmute,
+    slice::{self, Iter},
+};
 
 use crate::BufferHandle;
 
@@ -7,13 +10,13 @@ unsafe impl Send for Transfer {}
 
 pub struct Transfer {
     _buffer: BufferHandle,
-    iter: slice::Iter<'static, u8>,
+    iter: Iter<'static, u8>,
 }
 
 impl Transfer {
     pub fn new(buffer: BufferHandle) -> Self {
         let iter = unsafe {
-            core::mem::transmute::<core::slice::Iter<'_, u8>, core::slice::Iter<'static, u8>>(
+            transmute::<Iter<'_, u8>, Iter<'static, u8>>(
                 buffer.slice[..buffer.length() as usize].iter(),
             )
         };
@@ -22,6 +25,23 @@ impl Transfer {
             _buffer: buffer,
             iter,
         }
+    }
+
+    pub fn write_next(&mut self, byte: u8) -> Result<bool, ()> {
+        if let Some(slot) = self.iter.next() {
+            *slot = byte;
+            self.buffer.write_pos += 1; // Keep handle in sync
+
+            // Logic to determine if packet is done (e.g., CRC check, EOP char, or Full)
+            Ok(self.is_packet_complete(byte))
+        } else {
+            Err(()) // Buffer overflow
+        }
+    }
+
+    fn is_packet_complete(&self, last_byte: u8) -> bool {
+        // Your custom logic here
+        last_byte == b'\n' || self.buffer.write_pos == self.buffer.slice.len() as u8
     }
 }
 
