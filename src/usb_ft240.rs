@@ -217,8 +217,8 @@ impl UsbFT240 {
     }
 }
 
-static TX_STATE: Mutex<RefCell<Option<Transfer>>> = Mutex::new(RefCell::new(None));
-static RX_STATE: Mutex<RefCell<Option<Transfer>>> = Mutex::new(RefCell::new(None));
+static TX_STATE: Mutex<RefCell<Option<TxState>>> = Mutex::new(RefCell::new(None));
+static RX_STATE: Mutex<RefCell<Option<RxState>>> = Mutex::new(RefCell::new(None));
 
 pub struct UsbDriver;
 
@@ -236,7 +236,7 @@ impl Driver for UsbDriver {
                     return;
                 }
                 // setup the tx state
-                let mut state = Transfer::new(buffer);
+                let mut state = TxState::new(buffer);
                 // wait for txe to go low
                 while !usb.txe.is_low() {}
                 // get the first byte and start the transfer
@@ -268,7 +268,7 @@ impl Driver for UsbDriver {
                     return;
                 }
                 // setup the tx state
-                let mut state = Transfer::new(buffer);
+                let mut state = RxState::new(buffer);
                 // set the state
                 *RX_STATE.borrow(cs).borrow_mut() = Some(state);
                 // enable rx interrupts
@@ -318,36 +318,22 @@ fn INT6() {
     let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
     // get at our static reference
     if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
-        // get the transfer to write the byte into
-        // if the transfer doesn't exit, we can disable the rx interrupt and leave the byte there
-        // otherwise read the byte
-        // write it to the transfer
-        // figure out the next steps
+        if let Some(s) = RX_STATE.borrow(cs).borrow_mut().as_mut() {
+        match s.status(){
+            Ok(RxStatus::Ready) =>{
+                let byte = usb.read_byte();
+                s.try_receive(byte);
 
-        // get the next byte
-        let data = RX_STATE
-            .borrow(cs)
-            .borrow_mut()
-            .as_mut()
-            .and_then(|state| state.next());
+            },
+            Ok(RxStatus::Done) =>
+                usb.tx_int_disable(),
 
-        // read the byte
-
-        // get the tx state
-        match data {
-            Some(byte) => {
-                // write the data
-                usb.write_byte(byte);
-            }
-            None => {
-                // flush the data to the host
-                usb.flush();
-                // disable transmit interrupts
-                usb.tx_int_disable();
-                // take/drop the transfer buffer
-                let _state = TX_STATE.borrow(cs).take();
-            }
+            Err(_) =>
+                usb.tx_int_disable(),
         }
+            
+        }
+        
     }
 }
 
