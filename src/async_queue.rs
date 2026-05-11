@@ -139,7 +139,7 @@ impl<'a, T, const CAPACITY: usize> Future for PushFuture<'a, T, CAPACITY> {
 
             match queue.has_space() {
                 true => {
-                    let mut item = unsafe { self.get_unchecked_mut().item.take() };
+                    let item = unsafe { self.get_unchecked_mut().item.take() };
 
                     Poll::Ready(queue.try_push(item.unwrap()))
                 }

@@ -1,6 +1,7 @@
 use crate::driver::*;
 use crate::{BufferHandle, hal::Pin};
 use core::cell::RefCell;
+use core::task::{Context, Poll};
 
 use avr_device::at90can128;
 use avr_device::interrupt::Mutex;
@@ -222,6 +223,33 @@ static RX_STATE: Mutex<RefCell<Option<RxState>>> = Mutex::new(RefCell::new(None)
 
 pub struct UsbDriver;
 
+pub struct Packet;
+
+impl UsbDriver {
+    pub fn receive_packet(&self) -> Packet {
+        Packet
+    }
+}
+
+impl Future for Packet {
+    type Output = &'static [u8];
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // go interrupt free while checking for packet
+        avr_device::interrupt::free(|cs| {
+            if let Some(state) = RX_STATE.borrow(cs).borrow_mut().as_mut() {
+                // see if there are any packets
+                if let Some(packet) = state.try_pop_packet() {
+                    Poll::Ready(packet)
+                } else {
+                    Poll::Pending
+                }
+            } else {
+                Poll::Pending
+            }
+        })
+    }
+}
+
 impl Driver for UsbDriver {
     fn tx_submit(&mut self, buffer: BufferHandle) {
         // we should be awaiting an active transfer as well, but go get things going.  get the usb and wait
@@ -268,10 +296,10 @@ impl Driver for UsbDriver {
                     return;
                 }
                 // setup the tx state
-                let mut state = RxState::new(buffer);
+                let state = RxState::new(buffer, CrPacketizer);
                 // set the state
                 *RX_STATE.borrow(cs).borrow_mut() = Some(state);
-                // enable rx interrupts
+                // enable receive interrupts
                 usb.rx_int_enable();
             }
         });
@@ -319,21 +347,9 @@ fn INT6() {
     // get at our static reference
     if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
         if let Some(s) = RX_STATE.borrow(cs).borrow_mut().as_mut() {
-        match s.status(){
-            Ok(RxStatus::Ready) =>{
-                let byte = usb.read_byte();
-                s.try_receive(byte);
-
-            },
-            Ok(RxStatus::Done) =>
-                usb.tx_int_disable(),
-
-            Err(_) =>
-                usb.tx_int_disable(),
+            let byte = usb.read_byte();
+            _ = s.try_receive(byte);
         }
-            
-        }
-        
     }
 }
 

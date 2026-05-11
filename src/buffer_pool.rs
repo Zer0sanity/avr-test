@@ -33,7 +33,7 @@ type Result<T> = core::result::Result<T, BufferError>;
 static BUFFER_POOL: Mutex<RefCell<BufferPool<NUM_BUFFERS, BUFFER_SIZE>>> =
     Mutex::new(RefCell::new(BufferPool::new()));
 
-struct BufferAllocator<const BUFFER_COUNT: usize> {
+pub struct BufferAllocator<const BUFFER_COUNT: usize> {
     alloc_idx: u8,
     dealloc_idx: u8,
     allocations: [u8; BUFFER_COUNT],
@@ -100,6 +100,23 @@ impl<const BUFFER_COUNT: usize> BufferAllocator<BUFFER_COUNT> {
         self.in_use_mask &= !(1 << index);
         // return
         Ok(())
+    }
+
+    pub fn try_pop(&mut self) -> Option<u8> {
+        // do we have buffers any
+        if self.count != BUFFER_COUNT as u8 {
+            return None;
+        }
+        // get the index of the first one
+        let index = self.allocations[self.dealloc_idx as usize];
+        // increment the deallocation index
+        self.dealloc_idx = (self.dealloc_idx + 1) % BUFFER_COUNT as u8;
+        // increment the count
+        self.count += 1;
+        // clear the in_use_mask
+        self.in_use_mask &= !(1 << index);
+        // return
+        Some(index)
     }
 }
 
@@ -194,6 +211,19 @@ impl BufferHandle {
 
     pub fn length(&self) -> u8 {
         self.write_pos
+    }
+
+    pub fn write(&mut self, bytes: &[u8]) -> fmt::Result {
+        let len = bytes.len();
+        let write_pos = self.write_pos as usize;
+
+        if write_pos + len > self.slice.len() {
+            return Err(fmt::Error);
+        }
+
+        self.slice[write_pos..write_pos + len].copy_from_slice(bytes);
+        self.write_pos = write_pos as u8 + len as u8;
+        Ok(())
     }
 }
 

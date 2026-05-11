@@ -25,10 +25,6 @@ pub use buffer_pool::*;
 pub use driver::*;
 pub use usb_ft240::*;
 
-use crate::async_queue::AsyncQueue;
-
-static QUEUE: AsyncQueue<u8, 8> = AsyncQueue::new();
-
 #[avr_device::entry]
 fn main() -> ! {
     let dp = at90can128::Peripherals::take().unwrap();
@@ -69,21 +65,24 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
 
     led.on();
 
-    loop {
-        counter = counter.wrapping_add(1);
+    let mut rx_buffer_handle = BufferRequest.await;
+    usb.rx_submit(rx_buffer_handle);
 
+    loop {
+        let rx_buffer = usb.receive_packet().await;
         let mut handle = BufferRequest.await;
+        handle.write(rx_buffer);
+        usb.tx_submit(handle);
 
         if led.is_on() {
             led.off();
-            _ = write!(handle, "OFF: {}\r\n", counter);
-            usb.tx_submit(handle);
+            // _ = write!(handle, "OFF: {}\r\n", counter);
         } else {
             led.on();
-            _ = write!(handle, "ON: {}\r\n", counter);
-            usb.tx_submit(handle);
+            // _ = write!(handle, "ON: {}\r\n", counter);
+            // usb.tx_submit(handle);
         }
-        Timer::delay(250).await;
+        // Timer::delay(250).await;
 
         // QUEUE.push(5).await;
     }
