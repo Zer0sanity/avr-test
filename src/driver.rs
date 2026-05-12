@@ -6,30 +6,37 @@ unsafe impl Sync for TxState {}
 unsafe impl Send for TxState {}
 
 pub struct TxState {
-    _buffer: BufferHandle,
-    iter: Iter<'static, u8>,
+    // current position we are reading from
+    ptr: *mut u8,
+    // number of bytes in the buffer
+    len: u8,
+    // store the buffer handle to our backing memory
+    _buffer: Option<BufferHandle>,
 }
 
 impl TxState {
-    pub fn new(buffer: BufferHandle) -> Self {
-        let iter = unsafe {
-            transmute::<Iter<'_, u8>, Iter<'static, u8>>(
-                buffer.slice[..buffer.length() as usize].iter(),
-            )
-        };
-
+    pub fn new(buffer: BufferHandle, len: u8) -> Self {
         Self {
-            _buffer: buffer,
-            iter,
+            ptr: buffer.ptr,
+            len,
+            _buffer: Some(buffer),
         }
     }
-}
 
-impl Iterator for TxState {
-    type Item = u8;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().copied()
+    #[inline(always)]
+    pub fn read_byte(&mut self) -> Option<u8> {
+        // is there anything to read
+        if self.len == 0 {
+            return None;
+        }
+        // read a byte
+        let byte = unsafe { self.ptr.read_volatile() };
+        // update the pointer
+        self.ptr = unsafe { self.ptr.add(1) };
+        // update the length
+        self.len -= 1;
+        // return the next byte
+        Some(byte)
     }
 }
 
@@ -71,51 +78,49 @@ impl Packetizer for CrPacketizer {
 }
 
 pub struct RxState {
-    // iterator for writing
-    write_iter: IterMut<'static, u8>,
-    // current read position
-    read_iter: Iter<'static, u8>,
-    // number bytes in buffer
+    // pointer to the start of the buffer
+    ptr: *mut u8,
+    // write index
+    write_idx: u8,
+    // read index
+    read_idx: u8,
+    // number of bytes in the buffer
     len: u8,
+    // buffer capacity
+    capacity: u8,
+    // mask used to rollover
+    rollover_mask: u8,
+    // store the buffer handle to our backing memory
+    _buffer: Option<BufferHandle>,
     // waker to notify data is available to read
     pub waker: Option<Waker>,
-    // store handle to buffer and our backing memory for receiving
-    buffer: BufferHandle,
 }
 
 impl RxState {
     pub fn new(buffer: BufferHandle) -> Self {
-        // get a write iterator
-        let write_iter =
-            unsafe { transmute::<IterMut<'_, u8>, IterMut<'static, u8>>(buffer.slice.iter_mut()) };
-        // get a read iterator
-        let read_iter =
-            unsafe { transmute::<Iter<'_, u8>, Iter<'static, u8>>(buffer.slice.iter()) };
-        // setup self
         Self {
-            write_iter,
-            read_iter,
+            ptr: buffer.ptr,
+            write_idx: 0,
+            read_idx: 0,
             len: 0,
+            capacity: buffer.len,
+            rollover_mask: buffer.len - 1,
             waker: None,
-            buffer,
+            _buffer: Some(buffer),
         }
     }
 
-    pub fn is_full(&self) -> bool {
-        self.len == self.buffer.slice.len() as u8
+    #[inline(always)]
+    pub fn free_space(&self) -> u8 {
+        self.capacity - self.len
     }
 
+    #[inline(always)]
     pub fn write_byte(&mut self, byte: u8) {
-        // do we need to rollover
-        if self.write_iter.len() == 0 {
-            self.write_iter = unsafe {
-                transmute::<IterMut<'_, u8>, IterMut<'static, u8>>(self.buffer.slice.iter_mut())
-            };
-        }
         // write the byte
-        self.write_iter.next().map(|slot| {
-            *slot = byte;
-        });
+        unsafe { self.ptr.add(self.write_idx as usize).write_volatile(byte) };
+        // update the write index
+        self.write_idx = (self.write_idx + 1) & self.rollover_mask;
         // update the length
         self.len += 1;
         // wake the waker for anyone who's listening
@@ -124,20 +129,20 @@ impl RxState {
         }
     }
 
+    #[inline(always)]
     pub fn read_byte(&mut self) -> Option<u8> {
         // is there anything to read
-        if self.len > 0 {
+        if self.len == 0 {
             return None;
         }
-        // do we need to rollover
-        if self.read_iter.len() == 0 {
-            self.read_iter =
-                unsafe { transmute::<Iter<'_, u8>, Iter<'static, u8>>(self.buffer.slice.iter()) };
-        }
+        // read a byte
+        let byte = unsafe { self.ptr.add(self.read_idx as usize).read_volatile() };
+        // update the read index
+        self.read_idx = (self.read_idx + 1) & self.rollover_mask;
         // update the length
         self.len -= 1;
         // return the next byte
-        self.read_iter.next().copied()
+        Some(byte)
     }
 }
 
@@ -147,5 +152,5 @@ pub trait Driver {
 }
 
 // Local Variables:
-// jinx-local-words: "packetizer packetizing"
+// jinx-local-words: "packetizer packetizing waker"
 // End:

@@ -394,14 +394,15 @@ fn INT6() {
         if let Some(s) = RX_STATE.borrow(cs).borrow_mut().as_mut() {
             // if the buffer is full, leave byte in usb hardware buffer and disable Rx interrupts.
             // it will be waiting for us next time
-            if s.is_full() {
+            if s.free_space() != 0 {
+                // read byte off usb hardware
+                let byte = usb.read_byte();
+                // write it to the state buffer
+                s.write_byte(byte);
+            } else {
+                // disable interrupts
                 usb.rx_int_disable();
-                return;
             }
-            // read byte off usb hardware
-            let byte = usb.read_byte();
-            // write it to the state buffer
-            s.write_byte(byte);
         } else {
             // we have no state, disable interrupts
             usb.rx_int_disable();

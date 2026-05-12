@@ -173,13 +173,12 @@ impl Future for BufferRequest {
             buffer_pool
                 .allocator
                 .try_alloc()
-                .map(|indx| {
+                .map(|pool_idx| {
                     // some trickery to get a mutable slice
-                    let ptr = buffer_pool.pool[indx as usize].as_mut_ptr();
-                    let len = buffer_pool.pool[indx as usize].len();
-                    let buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
+                    let ptr = buffer_pool.pool[pool_idx as usize].as_mut_ptr();
+                    let len = buffer_pool.pool[pool_idx as usize].len() as u8;
                     // poll ready
-                    Poll::Ready(BufferHandle::new(indx, buf))
+                    Poll::Ready(BufferHandle::new(ptr, len, pool_idx))
                 })
                 .unwrap_or_else(|_| {
                     // set waker
@@ -198,66 +197,54 @@ impl Future for BufferRequest {
 }
 
 pub struct BufferHandle {
-    index: u8,
-    pub slice: &'static mut [u8],
-    write_pos: u8,
+    pub ptr: *mut u8,
+    pub len: u8,
+    pool_idx: u8,
 }
 
 impl BufferHandle {
     #[rustfmt::skip]
-    pub fn new(index: u8, slice: &'static mut [u8]) -> Self {
-        Self { index, slice, write_pos: 0 }
+    pub fn new(ptr: *mut u8, len: u8, pool_idx: u8) -> Self {
+        Self { ptr, len, pool_idx }
     }
 
-    pub fn length(&self) -> u8 {
-        self.write_pos
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len as usize) }
     }
 
-    pub fn write(&mut self, bytes: &[u8]) -> fmt::Result {
-        let len = bytes.len();
-        let write_pos = self.write_pos as usize;
-
-        if write_pos + len > self.slice.len() {
-            return Err(fmt::Error);
-        }
-
-        self.slice[write_pos..write_pos + len].copy_from_slice(bytes);
-        self.write_pos = write_pos as u8 + len as u8;
-        Ok(())
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len as usize) }
     }
 }
 
 impl Write for BufferHandle {
     fn write_str(&mut self, s: &str) -> fmt::Result {
+        // get the bytes representation of the string
         let bytes = s.as_bytes();
-        let len = bytes.len();
-        let write_pos = self.write_pos as usize;
-
-        if write_pos + len > self.slice.len() {
+        // first see if it will fit
+        if self.len < bytes.len() as u8 {
             return Err(fmt::Error);
         }
-
-        self.slice[write_pos..write_pos + len].copy_from_slice(bytes);
-        self.write_pos = write_pos as u8 + len as u8;
+        self.as_mut_slice().copy_from_slice(bytes);
         Ok(())
     }
 }
 
 impl Drop for BufferHandle {
     fn drop(&mut self) {
-        _ = BufferRequest::release_buffer(self.index);
+        _ = BufferRequest::release_buffer(self.pool_idx);
     }
 }
 
-impl Deref for BufferHandle {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        self.slice
-    }
-}
+// impl Deref for BufferHandle {
+//     type Target = [u8];
+//     fn deref(&self) -> &Self::Target {
+//         self.slice
+//     }
+// }
 
-impl DerefMut for BufferHandle {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.slice
-    }
-}
+// impl DerefMut for BufferHandle {
+//     fn deref_mut(&mut self) -> &mut Self::Target {
+//         self.slice
+//     }
+// }
