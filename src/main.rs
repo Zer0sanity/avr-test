@@ -63,22 +63,32 @@ fn main() -> ! {
 pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
     let mut counter: u16 = 0;
 
-    led.on();
+    // led.off();
 
+    // request a buffer for usb driver
     let mut rx_buffer_handle = BufferRequest.await;
+    // submit it to the driver
     usb.rx_submit(rx_buffer_handle);
 
     loop {
-        let rx_buffer = usb.receive_packet().await;
+        // request a buffer for receiving a packet
+        let mut rx_packet_buffer = BufferRequest.await;
+        // submit it to the driver to read a packet
+        let rx_buffer = usb.receive_packet(rx_packet_buffer).await;
+        led.on();
+
+        // request a buffer to echo back the received packet
         let mut handle = BufferRequest.await;
-        handle.write(rx_buffer);
+        // write the the received packet to the buffer
+        handle.write(rx_buffer.slice);
+        // send it
         usb.tx_submit(handle);
 
         if led.is_on() {
             led.off();
             // _ = write!(handle, "OFF: {}\r\n", counter);
         } else {
-            led.on();
+            // led.on();
             // _ = write!(handle, "ON: {}\r\n", counter);
             // usb.tx_submit(handle);
         }

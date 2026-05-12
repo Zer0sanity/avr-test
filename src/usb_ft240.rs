@@ -1,6 +1,8 @@
 use crate::driver::*;
 use crate::{BufferHandle, hal::Pin};
 use core::cell::RefCell;
+use core::mem::transmute;
+use core::slice::IterMut;
 use core::task::{Context, Poll};
 
 use avr_device::at90can128;
@@ -223,27 +225,69 @@ static RX_STATE: Mutex<RefCell<Option<RxState>>> = Mutex::new(RefCell::new(None)
 
 pub struct UsbDriver;
 
-pub struct Packet;
+pub struct Packet {
+    // iterator for writing
+    write_iter: IterMut<'static, u8>,
+    buffer: Option<BufferHandle>,
+}
+
+impl Packet {
+    pub fn new(buffer: BufferHandle) -> Self {
+        let write_iter =
+            unsafe { transmute::<IterMut<'_, u8>, IterMut<'static, u8>>(buffer.slice.iter_mut()) };
+
+        Self {
+            write_iter,
+            buffer: Some(buffer),
+        }
+    }
+}
 
 impl UsbDriver {
-    pub fn receive_packet(&self) -> Packet {
-        Packet
+    pub fn receive_packet(&self, buffer: BufferHandle) -> Packet {
+        Packet::new(buffer)
     }
 }
 
 impl Future for Packet {
-    type Output = &'static [u8];
-    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    type Output = BufferHandle;
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // go interrupt free while checking for packet
         avr_device::interrupt::free(|cs| {
+            // get the state
             if let Some(state) = RX_STATE.borrow(cs).borrow_mut().as_mut() {
-                // see if there are any packets
-                if let Some(packet) = state.try_pop_packet() {
-                    Poll::Ready(packet)
+                // loop while bytes are read or packet detected
+                let found_packet = loop {
+                    // try to read a byte
+                    if let Some(byte) = state.read_byte() {
+                        // write the byte to the buffer
+                        self.write_iter.next().map(|slot| {
+                            *slot = byte;
+                        });
+                        break true;
+
+                        // did we find a packet
+                        if byte == 0x0d {
+                            break true;
+                        }
+                    } else {
+                        // no more bytes
+                        break false;
+                    }
+                };
+
+                // did we find a packet
+                if found_packet {
+                    // return self
+                    Poll::Ready(self.buffer.take().unwrap())
                 } else {
+                    // register the waker
+                    state.waker = Some(cx.waker().clone());
+                    // return pending
                     Poll::Pending
                 }
             } else {
+                // no state, were in trouble here
                 Poll::Pending
             }
         })
@@ -296,7 +340,7 @@ impl Driver for UsbDriver {
                     return;
                 }
                 // setup the tx state
-                let state = RxState::new(buffer, CrPacketizer);
+                let state = RxState::new(buffer);
                 // set the state
                 *RX_STATE.borrow(cs).borrow_mut() = Some(state);
                 // enable receive interrupts
@@ -346,9 +390,21 @@ fn INT6() {
     let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
     // get at our static reference
     if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
+        // get at our state
         if let Some(s) = RX_STATE.borrow(cs).borrow_mut().as_mut() {
+            // if the buffer is full, leave byte in usb hardware buffer and disable Rx interrupts.
+            // it will be waiting for us next time
+            if s.is_full() {
+                usb.rx_int_disable();
+                return;
+            }
+            // read byte off usb hardware
             let byte = usb.read_byte();
-            _ = s.try_receive(byte);
+            // write it to the state buffer
+            s.write_byte(byte);
+        } else {
+            // we have no state, disable interrupts
+            usb.rx_int_disable();
         }
     }
 }

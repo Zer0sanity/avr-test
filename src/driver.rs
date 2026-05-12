@@ -1,4 +1,4 @@
-use core::{error::Error, fmt, mem::transmute, slice::Iter};
+use core::{error::Error, fmt, mem::transmute, slice::Iter, slice::IterMut, task::Waker};
 
 use crate::{BufferAllocator, BufferHandle};
 
@@ -71,66 +71,73 @@ impl Packetizer for CrPacketizer {
 }
 
 pub struct RxState {
-    // current write position
-    write_index: u8,
-    // tracking packets
-    packet_start_index: u8,
-    // packetizer for packetizing the byte stream
-    packetizer: CrPacketizer,
-    packets: [Option<&'static [u8]>; 4],
-    packet_allocator: BufferAllocator<4>,
+    // iterator for writing
+    write_iter: IterMut<'static, u8>,
+    // current read position
+    read_iter: Iter<'static, u8>,
+    // number bytes in buffer
+    len: u8,
+    // waker to notify data is available to read
+    pub waker: Option<Waker>,
     // store handle to buffer and our backing memory for receiving
     buffer: BufferHandle,
 }
 
 impl RxState {
-    pub fn new(buffer: BufferHandle, packetizer: CrPacketizer) -> Self {
+    pub fn new(buffer: BufferHandle) -> Self {
+        // get a write iterator
+        let write_iter =
+            unsafe { transmute::<IterMut<'_, u8>, IterMut<'static, u8>>(buffer.slice.iter_mut()) };
+        // get a read iterator
+        let read_iter =
+            unsafe { transmute::<Iter<'_, u8>, Iter<'static, u8>>(buffer.slice.iter()) };
+        // setup self
         Self {
-            write_index: 0,
-            packet_start_index: 0,
-            packetizer,
-            packets: [None; 4],
-            packet_allocator: BufferAllocator::new(),
+            write_iter,
+            read_iter,
+            len: 0,
+            waker: None,
             buffer,
         }
     }
 
-    pub fn try_receive(&mut self, byte: u8) -> Result<(), RxError> {
-        if self.write_index == self.buffer.slice.len() as u8 {
-            return Err(RxError::Overflow);
-        }
-        // write the byte
-        self.buffer.slice[self.write_index as usize] = byte;
-        // process the byte
-        match self.packetizer.receive_byte(byte) {
-            // still receiving bytes
-            RxStatus::Ready => self.write_index = self.write_index + 1,
-            // full packet received
-            RxStatus::Done => {
-                // some trickery to get a slice
-                let ptr = self.buffer.slice[self.write_index as usize] as *const u8;
-                let len = (self.write_index - self.packet_start_index + 1) as usize;
-                let packet = unsafe { core::slice::from_raw_parts(ptr, len) };
-                // push it
-                if let Ok(index) = self.packet_allocator.try_alloc() {
-                    self.packets[index as usize] = Some(packet);
-                }
-                // update the write index with wrap around
-                self.write_index = (self.write_index + 1) % self.buffer.slice.len() as u8;
-                // update the packet indexes
-                self.packet_start_index = self.write_index;
-            }
-        }
-        Ok(())
+    pub fn is_full(&self) -> bool {
+        self.len == self.buffer.slice.len() as u8
     }
 
-    pub fn try_pop_packet(&mut self) -> Option<&'static [u8]> {
-        if let Some(index) = self.packet_allocator.try_pop() {
-            let packet = self.packets[index as usize].take();
-            Some(packet?)
-        } else {
-            None
+    pub fn write_byte(&mut self, byte: u8) {
+        // do we need to rollover
+        if self.write_iter.len() == 0 {
+            self.write_iter = unsafe {
+                transmute::<IterMut<'_, u8>, IterMut<'static, u8>>(self.buffer.slice.iter_mut())
+            };
         }
+        // write the byte
+        self.write_iter.next().map(|slot| {
+            *slot = byte;
+        });
+        // update the length
+        self.len += 1;
+        // wake the waker for anyone who's listening
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+
+    pub fn read_byte(&mut self) -> Option<u8> {
+        // is there anything to read
+        if self.len > 0 {
+            return None;
+        }
+        // do we need to rollover
+        if self.read_iter.len() == 0 {
+            self.read_iter =
+                unsafe { transmute::<Iter<'_, u8>, Iter<'static, u8>>(self.buffer.slice.iter()) };
+        }
+        // update the length
+        self.len -= 1;
+        // return the next byte
+        self.read_iter.next().copied()
     }
 }
 
