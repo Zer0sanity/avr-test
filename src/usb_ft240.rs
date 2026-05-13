@@ -9,18 +9,6 @@ use avr_device::at90can128;
 use avr_device::interrupt::Mutex;
 use avr_hal_generic::port::mode;
 
-// bit mask for the different usb states
-// pub mod usb_state {
-//     pub const IDLE: u8 = 1 << 0;
-//     pub const TRANSMITTING: u8 = 1 << 1;
-//     pub const WAITING_FOR_SPACE: u8 = 1 << 2;
-//     pub const SPACE_AVAILABLE: u8 = 1 << 3;
-//     pub const DATA_RECEIVED: u8 = 1 << 4;
-// }
-
-// // static state
-// static USB_STATUS: AtomicU8 = AtomicU8::new(usb_state::IDLE | usb_state::SPACE_AVAILABLE);
-
 const TX_EXT_INT5: u8 = 1 << 5;
 const RX_EXT_INT6: u8 = 1 << 6;
 
@@ -30,13 +18,21 @@ unsafe impl Sync for UsbFT240 {}
 unsafe impl Send for UsbFT240 {}
 
 pub struct UsbFT240 {
-    siwu: Pin<mode::Output>, //SIWU Output to tell the FT240 to flush its transmit FIFO buffer to the PC
-    rd: Pin<mode::Output>, // RD Output to have the FT240 put a received byte from its FIFO to the data bus
-    wr: Pin<mode::Output>, // WR Output to have the FT240 read data byte from data bus to its transmit FIFO
-    txe: Pin<mode::Input>, // TXE Input to tell when the FT240 can accept data.  Pin will also be setup to generate an interrupt on falling edge when transmitting data
-    rxf: Pin<mode::Input>, // RXF Input to tell when data can be read from the FT240.  Pin will also be setup to generate an interrupt on falling edge for receiving data
-    sense: Pin<mode::Input>, // SENSE input to tell if USB is connected
-    bus_ptr: *const at90can128::portc::RegisterBlock, // BUS input/output port for read/write store as a pointer so we can preform full port read and writes
+    //SIWU Output to tell the FT240 to flush its transmit FIFO buffer to the PC
+    siwu: Pin<mode::Output>,
+    // RD Output to have the FT240 put a received byte from its FIFO to the data bus
+    rd: Pin<mode::Output>,
+    // WR Output to have the FT240 read data byte from data bus to its transmit FIFO
+    wr: Pin<mode::Output>,
+    // TXE Input to tell when the FT240 can accept data.  Pin will also be setup to generate an interrupt on falling edge when transmitting data
+    txe: Pin<mode::Input>,
+    // RXF Input to tell when data can be read from the FT240.  Pin will also be setup to generate an interrupt on falling edge for receiving data
+    rxf: Pin<mode::Input>,
+    // SENSE input to tell if USB is connected
+    sense: Pin<mode::Input>,
+    // input/output port for read/write store as a pointer so we can preform full port read and writes
+    bus_ptr: *const at90can128::portc::RegisterBlock,
+    // external interrupt pointer
     ext_int_ptr: *const at90can128::exint::RegisterBlock,
 }
 
@@ -253,30 +249,22 @@ impl Future for Packet {
                 // get at the buffer
                 if let Some(rx_buffer) = rx_state.buffer.as_mut() {
                     // loop while bytes are read or packet detected
-                    let found_packet = loop {
+                    loop {
                         // try to read a byte
-                        if let Some(byte) = rx_buffer.read_byte() {
+                        if let Some(byte) = rx_buffer.read_byte_wrapped() {
                             // write the byte to the buffer
                             self.buffer.as_mut().map(|b| b.write_byte(byte));
                             // did we find a packet
                             if byte == 0x0d {
-                                break true;
+                                // return self
+                                break Poll::Ready(self.buffer.take().unwrap());
                             }
                         } else {
-                            // no more bytes
-                            break false;
+                            // no more bytes register the waker
+                            rx_state.waker = Some(cx.waker().clone());
+                            // return pending
+                            break Poll::Pending;
                         }
-                    };
-
-                    // did we find a packet
-                    if found_packet {
-                        // return self
-                        Poll::Ready(self.buffer.take().unwrap())
-                    } else {
-                        // register the waker
-                        rx_state.waker = Some(cx.waker().clone());
-                        // return pending
-                        Poll::Pending
                     }
                 } else {
                     Poll::Pending
@@ -407,6 +395,10 @@ fn INT6() {
             } else {
                 // we have no buffer, disable interrupts
                 usb.rx_int_disable();
+            }
+            // kick the waker if its set
+            if let Some(waker) = rx_state.borrow(cs).take() {
+                waker.wake();
             }
         } else {
             // we have no state, disable interrupts
