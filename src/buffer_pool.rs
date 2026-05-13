@@ -9,7 +9,7 @@ use core::{
 
 use avr_device::interrupt::Mutex;
 
-const NUM_BUFFERS: usize = 4;
+const NUM_BUFFERS: usize = 8;
 const BUFFER_SIZE: usize = 64;
 
 #[derive(Debug)]
@@ -197,23 +197,148 @@ impl Future for BufferRequest {
 }
 
 pub struct BufferHandle {
-    pub ptr: *mut u8,
-    pub len: u8,
+    // pointer to the start of the buffer
+    ptr: *mut u8,
+    // read index
+    read_idx: u8,
+    // write index
+    write_idx: u8,
+    // number of bytes in the buffer
+    len: u8,
+    // buffer capacity
+    capacity: u8,
+    // index to return to buffer pool
     pool_idx: u8,
 }
 
 impl BufferHandle {
-    #[rustfmt::skip]
-    pub fn new(ptr: *mut u8, len: u8, pool_idx: u8) -> Self {
-        Self { ptr, len, pool_idx }
+    pub fn new(ptr: *mut u8, capacity: u8, pool_idx: u8) -> Self {
+        Self {
+            ptr,
+            read_idx: 0,
+            write_idx: 0,
+            len: 0,
+            capacity,
+            pool_idx,
+        }
     }
 
+    #[inline(always)]
+    pub fn free_space(&self) -> u8 {
+        self.capacity - self.len
+    }
+
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        self.read_idx = 0;
+    }
+
+    #[inline(always)]
+    /// there will be issues with this since there is no way to update read_idx or len
     pub fn as_slice(&self) -> &[u8] {
-        unsafe { core::slice::from_raw_parts(self.ptr, self.len as usize) }
+        // get a slice for reading based off the read_idx
+        unsafe {
+            let ptr = self.ptr.add(self.read_idx as usize);
+            let len = self.capacity - self.read_idx;
+            core::slice::from_raw_parts(ptr, len as usize)
+        }
     }
 
+    #[inline(always)]
+    /// there will be issues with this since there is no way to update write_idx or len
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len as usize) }
+        // get a slice for writing based off write index
+        unsafe {
+            let ptr = self.ptr.add(self.write_idx as usize);
+            let len = self.capacity - self.write_idx;
+            core::slice::from_raw_parts_mut(ptr, len as usize)
+        }
+    }
+
+    #[inline(always)]
+    pub fn read_byte(&mut self) -> Option<u8> {
+        // is there anything to read
+        if self.len == 0 {
+            return None;
+        }
+        // read a byte
+        let byte = unsafe { self.ptr.add(self.read_idx as usize).read_volatile() };
+        // update the read index
+        self.read_idx += 1;
+        // update the length
+        self.len -= 1;
+        // return the next byte
+        Some(byte)
+    }
+
+    #[inline(always)]
+    pub fn write_byte(&mut self, byte: u8) {
+        // check if we have space
+        if self.len == self.capacity {
+            return;
+        }
+        // write the byte
+        unsafe { self.ptr.add(self.write_idx as usize).write_volatile(byte) };
+        // update the write index
+        self.write_idx += 1;
+        // increment the length
+        self.len += 1;
+    }
+
+    #[inline(always)]
+    pub fn read_byte_wrapped(&mut self) -> Option<u8> {
+        // is there anything to read
+        if self.len == 0 {
+            return None;
+        }
+        // read a byte
+        let byte = unsafe { self.ptr.add(self.read_idx as usize).read_volatile() };
+        // update the read index
+        self.read_idx += 1;
+        // did the index hit the capacity
+        if self.read_idx == self.capacity {
+            // wrap it back to the beginning
+            self.write_idx = 0;
+        }
+        // decrement the length
+        self.len -= 1;
+        // return the next byte
+        Some(byte)
+    }
+
+    #[inline(always)]
+    pub fn write_byte_wrapped(&mut self, byte: u8) {
+        // check if we have space
+        if self.len == self.capacity {
+            return;
+        }
+        // write the byte
+        unsafe { self.ptr.add(self.write_idx as usize).write_volatile(byte) };
+        // update the write index
+        self.write_idx += 1;
+        // did the index hit the capacity
+        if self.write_idx == self.capacity {
+            // wrap it back to the beginning
+            self.write_idx = 0;
+        }
+        // increment the length
+        self.len += 1;
+    }
+
+    #[inline(always)]
+    pub fn write(&mut self, bytes: &[u8]) {
+        // get the length
+        let len = bytes.len() as u8;
+        // first see if it will fit
+        if self.free_space() < len {
+            return;
+        }
+        // get a mutable slice and write the bytes
+        self.as_mut_slice().copy_from_slice(bytes);
+        // update the write index
+        self.write_idx += len;
+        // increment the length
+        self.len += len;
     }
 }
 
@@ -221,11 +346,17 @@ impl Write for BufferHandle {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         // get the bytes representation of the string
         let bytes = s.as_bytes();
+        let len = bytes.len() as u8;
         // first see if it will fit
-        if self.len < bytes.len() as u8 {
+        if self.free_space() < len {
             return Err(fmt::Error);
         }
+        // get a mutable slice and write the bytes
         self.as_mut_slice().copy_from_slice(bytes);
+        // update the write index
+        self.write_idx += len;
+        // increment the length
+        self.len += len;
         Ok(())
     }
 }
@@ -248,3 +379,7 @@ impl Drop for BufferHandle {
 //         self.slice
 //     }
 // }
+
+// Local Variables:
+// jinx-local-words: "idx len"
+// End:

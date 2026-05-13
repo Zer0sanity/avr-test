@@ -226,18 +226,12 @@ static RX_STATE: Mutex<RefCell<Option<RxState>>> = Mutex::new(RefCell::new(None)
 pub struct UsbDriver;
 
 pub struct Packet {
-    // iterator for writing
-    write_iter: IterMut<'static, u8>,
     buffer: Option<BufferHandle>,
 }
 
 impl Packet {
     pub fn new(buffer: BufferHandle) -> Self {
-        let write_iter =
-            unsafe { transmute::<IterMut<'_, u8>, IterMut<'static, u8>>(buffer.slice.iter_mut()) };
-
         Self {
-            write_iter,
             buffer: Some(buffer),
         }
     }
@@ -255,35 +249,36 @@ impl Future for Packet {
         // go interrupt free while checking for packet
         avr_device::interrupt::free(|cs| {
             // get the state
-            if let Some(state) = RX_STATE.borrow(cs).borrow_mut().as_mut() {
-                // loop while bytes are read or packet detected
-                let found_packet = loop {
-                    // try to read a byte
-                    if let Some(byte) = state.read_byte() {
-                        // write the byte to the buffer
-                        self.write_iter.next().map(|slot| {
-                            *slot = byte;
-                        });
-                        break true;
-
-                        // did we find a packet
-                        if byte == 0x0d {
-                            break true;
+            if let Some(rx_state) = RX_STATE.borrow(cs).borrow_mut().as_mut() {
+                // get at the buffer
+                if let Some(rx_buffer) = rx_state.buffer.as_mut() {
+                    // loop while bytes are read or packet detected
+                    let found_packet = loop {
+                        // try to read a byte
+                        if let Some(byte) = rx_buffer.read_byte() {
+                            // write the byte to the buffer
+                            self.buffer.as_mut().map(|b| b.write_byte(byte));
+                            // did we find a packet
+                            if byte == 0x0d {
+                                break true;
+                            }
+                        } else {
+                            // no more bytes
+                            break false;
                         }
-                    } else {
-                        // no more bytes
-                        break false;
-                    }
-                };
+                    };
 
-                // did we find a packet
-                if found_packet {
-                    // return self
-                    Poll::Ready(self.buffer.take().unwrap())
+                    // did we find a packet
+                    if found_packet {
+                        // return self
+                        Poll::Ready(self.buffer.take().unwrap())
+                    } else {
+                        // register the waker
+                        rx_state.waker = Some(cx.waker().clone());
+                        // return pending
+                        Poll::Pending
+                    }
                 } else {
-                    // register the waker
-                    state.waker = Some(cx.waker().clone());
-                    // return pending
                     Poll::Pending
                 }
             } else {
@@ -312,16 +307,16 @@ impl Driver for UsbDriver {
                 // wait for txe to go low
                 while !usb.txe.is_low() {}
                 // get the first byte and start the transfer
-                match state.next() {
-                    None => usb.tx_int_disable(),
-                    Some(byte) => {
-                        // set the state
-                        *TX_STATE.borrow(cs).borrow_mut() = Some(state);
-                        // enable the transmit interrupts
-                        usb.tx_int_enable();
-                        // kick off the first one
-                        usb.write_byte(byte);
-                    }
+                if let Some(byte) = state.buffer.as_mut().and_then(|b| b.read_byte()) {
+                    // set the state
+                    *TX_STATE.borrow(cs).borrow_mut() = Some(state);
+                    // enable the transmit interrupts
+                    usb.tx_int_enable();
+                    // kick off the first one
+                    usb.write_byte(byte);
+                } else {
+                    // no byte found, ensure interrupts are disabled
+                    usb.tx_int_disable()
                 }
             }
         });
@@ -358,27 +353,31 @@ fn INT5() {
     let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
     // get at our static reference
     if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
-        // get the next byte
-        let data = TX_STATE
-            .borrow(cs)
-            .borrow_mut()
-            .as_mut()
-            .and_then(|state| state.next());
-
-        // get the tx state
-        match data {
-            Some(byte) => {
-                // write the data
-                usb.write_byte(byte);
-            }
-            None => {
-                // flush the data to the host
-                usb.flush();
-                // disable transmit interrupts
+        // get at our state
+        if let Some(tx_state) = TX_STATE.borrow(cs).borrow_mut().as_mut() {
+            // get at the buffer
+            if let Some(buffer) = tx_state.buffer.as_mut() {
+                // grab the next byte
+                if let Some(byte) = buffer.read_byte() {
+                    // write it
+                    usb.write_byte(byte);
+                } else {
+                    // flush the data to the host
+                    usb.flush();
+                    // disable transmit interrupts
+                    usb.tx_int_disable();
+                    // take/drop the transfer buffer
+                    _ = TX_STATE.borrow(cs).take();
+                }
+            } else {
+                // we have no buffer what are we doing here, disable transmit interrupts
                 usb.tx_int_disable();
                 // take/drop the transfer buffer
-                let _state = TX_STATE.borrow(cs).take();
+                _ = TX_STATE.borrow(cs).take();
             }
+        } else {
+            // we have no state what are we doing here, disable transmit interrupts
+            usb.tx_int_disable();
         }
     }
 }
@@ -391,16 +390,22 @@ fn INT6() {
     // get at our static reference
     if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
         // get at our state
-        if let Some(s) = RX_STATE.borrow(cs).borrow_mut().as_mut() {
-            // if the buffer is full, leave byte in usb hardware buffer and disable Rx interrupts.
-            // it will be waiting for us next time
-            if s.free_space() != 0 {
-                // read byte off usb hardware
-                let byte = usb.read_byte();
-                // write it to the state buffer
-                s.write_byte(byte);
+        if let Some(rx_state) = RX_STATE.borrow(cs).borrow_mut().as_mut() {
+            // get at the buffer
+            if let Some(buffer) = rx_state.buffer.as_mut() {
+                // if the buffer is full, leave byte in usb hardware buffer and disable Rx interrupts.
+                // when the reader re-enable interrupts after reading bytes, the data will be waiting.
+                if buffer.free_space() != 0 {
+                    // read byte off usb hardware
+                    let byte = usb.read_byte();
+                    // write it to the state buffer
+                    buffer.write_byte(byte);
+                } else {
+                    // disable interrupts
+                    usb.rx_int_disable();
+                }
             } else {
-                // disable interrupts
+                // we have no buffer, disable interrupts
                 usb.rx_int_disable();
             }
         } else {
