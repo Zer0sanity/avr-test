@@ -304,9 +304,9 @@ impl Driver for UsbDriver {
             // get the usb reference
             if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
                 // Simple busy check
-                if TX_STATE.borrow(cs).borrow().is_some() {
-                    return;
-                }
+                // if TX_STATE.borrow(cs).borrow().is_some() {
+                //     return;
+                // }
                 // setup the tx state
                 let mut state = TxState::new(buffer);
                 // wait for txe to go low
@@ -381,7 +381,7 @@ fn INT5() {
             // we have no buffer, disable interrupts
             usb.rx_int_disable();
             // take/drop the transfer buffer
-            _ = TX_STATE.borrow(cs).take();
+            // _ = TX_STATE.borrow(cs).take();
             // kick the waker if its set
             if let Some(waker) = tx_state.waker.take() {
                 waker.wake();
@@ -399,7 +399,7 @@ fn INT5() {
         // disable transmit interrupts
         usb.tx_int_disable();
         // take/drop the transfer buffer
-        _ = TX_STATE.borrow(cs).take();
+        // _ = TX_STATE.borrow(cs).take();
     }
     // kick the waker if its set
     if let Some(waker) = tx_state.waker.take() {
