@@ -63,46 +63,47 @@ fn main() -> ! {
 pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
     let mut counter: u16 = 0;
 
-    // led.off();
+    led.on();
 
-    // // request a buffer for usb driver
-    // let mut rx_buffer_handle = BufferRequest.await;
-    // // submit it to the driver
-    // usb.rx_submit(rx_buffer_handle);
+    // request a buffer for usb driver
+    let mut rx_buffer_handle = BufferRequest.await;
+    // submit it to the driver
+    usb.rx_submit(rx_buffer_handle);
 
     loop {
-        // Timer::delay(1000).await;
-        // led.off();
+        Timer::delay(1000).await;
+        led.off();
 
-        // // request a buffer for receiving a packet
-        // let mut rx_packet_buffer = BufferRequest.await;
+        // request a buffer for receiving a packet
+        let mut packet_buffer = BufferRequest.await;
 
-        // Timer::delay(1000).await;
-        // led.on();
+        Timer::delay(1000).await;
+        led.on();
 
-        // let mut rx_buffer = usb.receive_packet(rx_packet_buffer).await;
+        let mut packet_result = usb.receive_packet(packet_buffer).await;
+        if let Ok(mut buffer) = packet_result {
+            Timer::delay(1000).await;
+            led.off();
 
-        // Timer::delay(1000).await;
-        // led.off();
+            // send it
+            buffer.reset();
+            usb.tx_submit(buffer);
+        }
 
-        // // send it
-        // rx_buffer.reset();
-        // usb.tx_submit(rx_buffer);
-
-        // Timer::delay(1000).await;
-        // led.on();
+        Timer::delay(1000).await;
+        led.on();
         // let mut buffer = BufferRequest.await;
 
-        if led.is_on() {
-            led.off();
-            // _ = write!(buffer, "OFF: {}\r\n", counter);
-            // usb.tx_submit(buffer);
-        } else {
-            led.on();
-            // _ = write!(buffer, "ON: {}\r\n", counter);
-            // usb.tx_submit(buffer);
-        }
-        Timer::delay(250).await;
+        // if led.is_on() {
+        //     led.off();
+        //     // _ = write!(buffer, "OFF: {}\r\n", counter);
+        //     // usb.tx_submit(buffer);
+        // } else {
+        //     led.on();
+        //     // _ = write!(buffer, "ON: {}\r\n", counter);
+        //     // usb.tx_submit(buffer);
+        // }
+        // Timer::delay(250).await;
 
         // QUEUE.push(5).await;
     }

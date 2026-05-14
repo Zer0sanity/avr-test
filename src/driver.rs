@@ -1,9 +1,5 @@
-use core::{error::Error, fmt, mem::transmute, slice::Iter, slice::IterMut, task::Waker};
-
-use crate::{BufferAllocator, BufferHandle};
-
-unsafe impl Sync for TxState {}
-unsafe impl Send for TxState {}
+use crate::BufferHandle;
+use core::task::Waker;
 
 pub struct TxState {
     // store the buffer handle to our backing memory
@@ -21,9 +17,6 @@ impl TxState {
     }
 }
 
-unsafe impl Sync for RxState {}
-unsafe impl Send for RxState {}
-
 pub struct RxState {
     // store the buffer handle to our backing memory
     pub buffer: Option<BufferHandle>,
@@ -38,6 +31,14 @@ impl RxState {
             waker: None,
         }
     }
+}
+
+#[derive(Debug)]
+pub enum DriverError {
+    MissingDriver,
+    MissingGlobalState,
+    MissingGlobalBuffer,
+    MissingFutureBuffer,
 }
 
 pub trait Driver {

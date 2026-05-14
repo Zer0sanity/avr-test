@@ -8,6 +8,7 @@ use core::task::{Context, Poll};
 use avr_device::at90can128;
 use avr_device::interrupt::Mutex;
 use avr_hal_generic::port::mode;
+use avr_hal_generic::prelude::_embedded_hal_blocking_delay_DelayUs;
 
 const TX_EXT_INT5: u8 = 1 << 5;
 const RX_EXT_INT6: u8 = 1 << 6;
@@ -145,6 +146,7 @@ impl UsbFT240 {
 
     // This sub will preform the required operation to transmit byte to the FT240.
     // NOTE:  This sub is not thread safe and should be called with interrupts disabled if interrupts are being used.
+    #[inline(always)]
     pub fn write_byte(&mut self, data: u8) {
         // someone is going to cringe, but real men are unsafe
         unsafe {
@@ -170,6 +172,7 @@ impl UsbFT240 {
     // This sub will preform the required operation to receive a byte from the FT240.
     // NOTE:  This sub is not thread safe and should be called with interrupts disabled
     // if interrupts are being used.
+    #[inline(always)]
     pub fn read_byte(&mut self) -> u8 {
         // someone is going to cringe, but there pronouns are her/she
         unsafe {
@@ -240,39 +243,53 @@ impl UsbDriver {
 }
 
 impl Future for Packet {
-    type Output = BufferHandle;
+    type Output = Result<BufferHandle, DriverError>;
     fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // go interrupt free while checking for packet
         avr_device::interrupt::free(|cs| {
+            // its possible that we could get polled again after returning ready.  so, ensure we have
+            // buffer to receive bytes into. since we take and return the buffer after detecting a packet
+            // it will be none.
+            let packet_buffer = match self.buffer.as_mut() {
+                Some(buffer) => buffer,
+                None => return Poll::Ready(Err(DriverError::MissingFutureBuffer)),
+            };
+            // get the driver
+            let mut usb_lock = USB.borrow(cs).borrow_mut();
+            let usb = match usb_lock.as_mut() {
+                Some(driver) => driver,
+                None => return Poll::Ready(Err(DriverError::MissingDriver)),
+            };
             // get the state
-            if let Some(rx_state) = RX_STATE.borrow(cs).borrow_mut().as_mut() {
-                // get at the buffer
-                if let Some(rx_buffer) = rx_state.buffer.as_mut() {
-                    // loop while bytes are read or packet detected
-                    loop {
-                        // try to read a byte
-                        if let Some(byte) = rx_buffer.read_byte_wrapped() {
-                            // write the byte to the buffer
-                            self.buffer.as_mut().map(|b| b.write_byte(byte));
-                            // did we find a packet
-                            if byte == 0x0d {
-                                // return self
-                                break Poll::Ready(self.buffer.take().unwrap());
-                            }
-                        } else {
-                            // no more bytes register the waker
-                            rx_state.waker = Some(cx.waker().clone());
-                            // return pending
-                            break Poll::Pending;
-                        }
-                    }
-                } else {
-                    Poll::Pending
+            let mut state_lock = RX_STATE.borrow(cs).borrow_mut();
+            // get the rx state
+            let rx_state = match state_lock.as_mut() {
+                Some(state) => state,
+                None => return Poll::Ready(Err(DriverError::MissingGlobalState)),
+            };
+            // get the rx buffer
+            let rx_buffer = match rx_state.buffer.as_mut() {
+                Some(buffer) => buffer,
+                None => return Poll::Ready(Err(DriverError::MissingGlobalBuffer)),
+            };
+            // while there are bytes to read and we haven't read a packer
+            while let Some(byte) = rx_buffer.read_byte_wrapped() {
+                // write the byte
+                packet_buffer.write_byte(byte);
+                // if a packet was read
+                if byte == 0x0d {
+                    // ensure interrupts are enabled
+                    usb.rx_int_enable();
+                    // return the packet buffer
+                    return Poll::Ready(Ok(self.buffer.take().unwrap()));
                 }
-            } else {
-                // no state, were in trouble here
-                Poll::Pending
             }
+            // rx_buffer is empty, ensure interrupts are enabled
+            usb.rx_int_enable();
+            //register the waker
+            rx_state.waker = Some(cx.waker().clone());
+            // poll pending
+            return Poll::Pending;
         })
     }
 }
@@ -311,8 +328,7 @@ impl Driver for UsbDriver {
     }
 
     fn rx_submit(&mut self, buffer: BufferHandle) {
-        // we should be awaiting an active transfer as well, but go get things going.  get the usb and wait
-        // and set the state if its not already set
+        // submits a buffer for interrupts to receive bytes into
 
         // go interrupt free while updating state
         avr_device::interrupt::free(|cs| {
@@ -339,74 +355,111 @@ impl Driver for UsbDriver {
 fn INT5() {
     // Forge a token. This is safe ONLY because we are in an ISR.
     let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
-    // get at our static reference
-    if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
-        // get at our state
-        if let Some(tx_state) = TX_STATE.borrow(cs).borrow_mut().as_mut() {
-            // get at the buffer
-            if let Some(buffer) = tx_state.buffer.as_mut() {
-                // grab the next byte
-                if let Some(byte) = buffer.read_byte() {
-                    // write it
-                    usb.write_byte(byte);
-                } else {
-                    // flush the data to the host
-                    usb.flush();
-                    // disable transmit interrupts
-                    usb.tx_int_disable();
-                    // take/drop the transfer buffer
-                    _ = TX_STATE.borrow(cs).take();
-                }
-            } else {
-                // we have no buffer what are we doing here, disable transmit interrupts
-                usb.tx_int_disable();
-                // take/drop the transfer buffer
-                _ = TX_STATE.borrow(cs).take();
-            }
-        } else {
-            // we have no state what are we doing here, disable transmit interrupts
+    // Forge a token. This is safe ONLY because we are in an ISR.
+    let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
+    // get the driver
+    let mut usb_lock = USB.borrow(cs).borrow_mut();
+    let usb = match usb_lock.as_mut() {
+        Some(driver) => driver,
+        None => return,
+    };
+    // get the state
+    let mut state_lock = TX_STATE.borrow(cs).borrow_mut();
+    // get the tx state
+    let tx_state = match state_lock.as_mut() {
+        Some(state) => state,
+        None => {
+            // we have no state, disable interrupts
             usb.tx_int_disable();
+            return;
         }
+    };
+    // get the tx buffer
+    let tx_buffer = match tx_state.buffer.as_mut() {
+        Some(buffer) => buffer,
+        None => {
+            // we have no buffer, disable interrupts
+            usb.rx_int_disable();
+            // take/drop the transfer buffer
+            _ = TX_STATE.borrow(cs).take();
+            // kick the waker if its set
+            if let Some(waker) = tx_state.waker.take() {
+                waker.wake();
+            }
+            return;
+        }
+    };
+    // grab the next byte
+    if let Some(byte) = tx_buffer.read_byte() {
+        // write it
+        usb.write_byte(byte);
+    } else {
+        // flush the data to the host
+        usb.flush();
+        // disable transmit interrupts
+        usb.tx_int_disable();
+        // take/drop the transfer buffer
+        _ = TX_STATE.borrow(cs).take();
+    }
+    // kick the waker if its set
+    if let Some(waker) = tx_state.waker.take() {
+        waker.wake();
     }
 }
 
-// //USB Rx Interrupt
+//USB Rx Interrupt
 #[avr_device::interrupt(at90can128)]
 fn INT6() {
     // Forge a token. This is safe ONLY because we are in an ISR.
     let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
-    // get at our static reference
-    if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
-        // get at our state
-        if let Some(rx_state) = RX_STATE.borrow(cs).borrow_mut().as_mut() {
-            // get at the buffer
-            if let Some(buffer) = rx_state.buffer.as_mut() {
-                // if the buffer is full, leave byte in usb hardware buffer and disable Rx interrupts.
-                // when the reader re-enable interrupts after reading bytes, the data will be waiting.
-                if buffer.free_space() != 0 {
-                    // read byte off usb hardware
-                    let byte = usb.read_byte();
-                    // write it to the state buffer
-                    buffer.write_byte(byte);
-                } else {
-                    // disable interrupts
-                    usb.rx_int_disable();
-                }
-            } else {
-                // we have no buffer, disable interrupts
-                usb.rx_int_disable();
-            }
-            // kick the waker if its set
-            if let Some(waker) = rx_state.borrow(cs).take() {
-                waker.wake();
-            }
-        } else {
+    // get the driver
+    let mut usb_lock = USB.borrow(cs).borrow_mut();
+    let usb = match usb_lock.as_mut() {
+        Some(driver) => driver,
+        None => return,
+    };
+    // get the state
+    let mut state_lock = RX_STATE.borrow(cs).borrow_mut();
+    // get the rx state
+    let rx_state = match state_lock.as_mut() {
+        Some(state) => state,
+        None => {
             // we have no state, disable interrupts
             usb.rx_int_disable();
+            return;
         }
+    };
+    // get the rx buffer
+    let rx_buffer = match rx_state.buffer.as_mut() {
+        Some(buffer) => buffer,
+        None => {
+            // we have no buffer, disable interrupts
+            usb.rx_int_disable();
+            // kick the waker if its set
+            if let Some(waker) = rx_state.waker.take() {
+                waker.wake();
+            }
+            return;
+        }
+    };
+    // if the buffer is full, leave byte in usb hardware buffer and disable Rx interrupts.
+    // when the reader re-enable interrupts after reading bytes, the data will be waiting.
+    // TODO there is a optimization here to read more then one byte at a time.
+    if rx_buffer.free_space() != 0 {
+        // read byte off usb hardware
+        let byte = usb.read_byte();
+        // write it to the state buffer
+        rx_buffer.write_byte(byte);
+    } else {
+        // disable interrupts
+        usb.rx_int_disable();
+    }
+    // kick the waker if its set
+    if let Some(waker) = rx_state.waker.take() {
+        waker.wake();
     }
 }
 
 // Local Variables:
-// jinx-local-words: "isr nop tx txe usb"
+// jinx-local-words: "isr nop rx tx txe usb"
 // End:

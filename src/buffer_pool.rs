@@ -196,6 +196,10 @@ impl Future for BufferRequest {
     }
 }
 
+// because buffer handle
+unsafe impl Send for BufferHandle {}
+unsafe impl Sync for BufferHandle {}
+
 pub struct BufferHandle {
     // pointer to the start of the buffer
     ptr: *mut u8,
