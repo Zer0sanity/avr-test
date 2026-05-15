@@ -2,7 +2,7 @@ use core::{
     cell::RefCell,
     error::Error,
     fmt::{self, Write},
-    ops::{Deref, DerefMut},
+    // ops::{Deref, DerefMut},
     pin::Pin,
     task::{Context, Poll, Waker},
 };

@@ -1,14 +1,11 @@
 use crate::driver::*;
 use crate::{BufferHandle, hal::Pin};
 use core::cell::RefCell;
-use core::mem::transmute;
-use core::slice::IterMut;
 use core::task::{Context, Poll};
 
 use avr_device::at90can128;
 use avr_device::interrupt::Mutex;
 use avr_hal_generic::port::mode;
-use avr_hal_generic::prelude::_embedded_hal_blocking_delay_DelayUs;
 
 const TX_EXT_INT5: u8 = 1 << 5;
 const RX_EXT_INT6: u8 = 1 << 6;
@@ -28,8 +25,10 @@ pub struct UsbFT240 {
     // TXE Input to tell when the FT240 can accept data.  Pin will also be setup to generate an interrupt on falling edge when transmitting data
     txe: Pin<mode::Input>,
     // RXF Input to tell when data can be read from the FT240.  Pin will also be setup to generate an interrupt on falling edge for receiving data
+    #[allow(unused)]
     rxf: Pin<mode::Input>,
     // SENSE input to tell if USB is connected
+    #[allow(unused)]
     sense: Pin<mode::Input>,
     // input/output port for read/write store as a pointer so we can preform full port read and writes
     bus_ptr: *const at90can128::portc::RegisterBlock,
@@ -73,6 +72,7 @@ impl UsbFT240 {
     }
 
     // return the state of the sense pin
+    #[allow(unused)]
     #[inline(always)]
     fn connected(&self) -> bool {
         self.sense.is_high()
@@ -142,6 +142,14 @@ impl UsbFT240 {
         ext_int
             .eifr()
             .write(|w| unsafe { w.intf().bits(TX_EXT_INT5) });
+    }
+
+    // disable transmit interrupts
+    #[inline(always)]
+    pub fn tx_int_enabled(&self) -> bool {
+        let ext_int = unsafe { &*self.ext_int_ptr };
+        // disable interrupts
+        ext_int.eimsk().read().int().bits() & TX_EXT_INT5 != 0
     }
 
     // This sub will preform the required operation to transmit byte to the FT240.
@@ -224,25 +232,11 @@ static RX_STATE: Mutex<RefCell<Option<RxState>>> = Mutex::new(RefCell::new(None)
 
 pub struct UsbDriver;
 
-pub struct Packet {
+pub struct UsbRxFuture {
     buffer: Option<BufferHandle>,
 }
 
-impl Packet {
-    pub fn new(buffer: BufferHandle) -> Self {
-        Self {
-            buffer: Some(buffer),
-        }
-    }
-}
-
-impl UsbDriver {
-    pub fn receive_packet(&self, buffer: BufferHandle) -> Packet {
-        Packet::new(buffer)
-    }
-}
-
-impl Future for Packet {
+impl Future for UsbRxFuture {
     type Output = Result<BufferHandle, DriverError>;
     fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // go interrupt free while checking for packet
@@ -294,58 +288,117 @@ impl Future for Packet {
     }
 }
 
-impl Driver for UsbDriver {
-    fn tx_submit(&mut self, buffer: BufferHandle) {
-        // we should be awaiting an active transfer as well, but go get things going.  get the usb and wait
-        // wait for the TXE pin to go low
+pub struct UsbTxFuture;
 
+impl Future for UsbTxFuture {
+    type Output = Result<BufferHandle, DriverError>;
+
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // go interrupt free while checking for packet
+        avr_device::interrupt::free(|cs| {
+            // get the state
+            let mut state_lock = TX_STATE.borrow(cs).borrow_mut();
+            // get the tx state
+            let tx_state = match state_lock.as_mut() {
+                Some(state) => state,
+                None => return Poll::Ready(Err(DriverError::MissingGlobalState)),
+            };
+            // if the result is set the transmission completed or had errors
+            if tx_state.result.is_some() {
+                // take the state
+                let mut state = state_lock.take().unwrap();
+                // take the result
+                let result = state.result.take().unwrap();
+                // check the result
+                if result.is_ok() {
+                    // take the buffer
+                    let tx_buffer = state.buffer.take();
+                    return match tx_buffer {
+                        Some(buffer) => Poll::Ready(Ok(buffer)),
+                        None => Poll::Ready(Err(DriverError::MissingGlobalBuffer)),
+                    };
+                } else {
+                    return Poll::Ready(Err(result.unwrap_err()));
+                }
+            } else {
+                //register the waker
+                tx_state.waker = Some(cx.waker().clone());
+                // poll pending
+                return Poll::Pending;
+            }
+        })
+    }
+}
+
+impl Driver for UsbDriver {
+    type RxFuture = UsbRxFuture;
+    type TxFuture = UsbTxFuture;
+
+    fn init(&mut self, buffer: BufferHandle) {
         // go interrupt free while updating state
         avr_device::interrupt::free(|cs| {
             // get the usb reference
-            if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
-                // Simple busy check
-                // if TX_STATE.borrow(cs).borrow().is_some() {
-                //     return;
-                // }
-                // setup the tx state
-                let mut state = TxState::new(buffer);
-                // wait for txe to go low
-                while !usb.txe.is_low() {}
-                // get the first byte and start the transfer
-                if let Some(byte) = state.buffer.as_mut().and_then(|b| b.read_byte()) {
+            let mut usb_lock = USB.borrow(cs).borrow_mut();
+            let usb = match usb_lock.as_mut() {
+                Some(driver) => driver,
+                None => return,
+            };
+            // setup the tx state
+            let state = RxState::new(buffer);
+            // set the state
+            *RX_STATE.borrow(cs).borrow_mut() = Some(state);
+            // enable receive interrupts
+            usb.rx_int_enable();
+        });
+    }
+
+    fn read(&mut self, buffer: BufferHandle) -> Self::RxFuture {
+        // submits a buffer for the async rx future to receive bytes into
+        UsbRxFuture {
+            buffer: Some(buffer),
+        }
+    }
+
+    fn write(&mut self, mut buffer: BufferHandle) -> Self::TxFuture {
+        // go interrupt free while updating state
+        avr_device::interrupt::free(|cs| {
+            // get the usb reference
+            let mut usb_lock = USB.borrow(cs).borrow_mut();
+            let usb = match usb_lock.as_mut() {
+                Some(driver) => driver,
+                // no driver
+                None => {
+                    // set the state to an error so the future will complete
+                    *TX_STATE.borrow(cs).borrow_mut() =
+                        Some(TxState::error(buffer, DriverError::MissingDriver));
+                    // return a future
+                    return UsbTxFuture;
+                }
+            };
+            // wait for txe to go low
+            while !usb.txe.is_low() {}
+            // grab
+            match buffer.read_byte() {
+                Some(byte) => {
                     // set the state
-                    *TX_STATE.borrow(cs).borrow_mut() = Some(state);
+                    *TX_STATE.borrow(cs).borrow_mut() = Some(TxState::new(buffer));
                     // enable the transmit interrupts
                     usb.tx_int_enable();
                     // kick off the first one
                     usb.write_byte(byte);
-                } else {
-                    // no byte found, ensure interrupts are disabled
+                }
+                // no byte found
+                None => {
+                    // set the state to an error so the future will complete
+                    *TX_STATE.borrow(cs).borrow_mut() =
+                        Some(TxState::error(buffer, DriverError::BufferEmpty));
+                    // disable transmit interrupts
                     usb.tx_int_disable()
                 }
             }
-        });
-    }
-
-    fn rx_submit(&mut self, buffer: BufferHandle) {
-        // submits a buffer for interrupts to receive bytes into
-
-        // go interrupt free while updating state
-        avr_device::interrupt::free(|cs| {
-            // get the usb reference
-            if let Some(usb) = USB.borrow(cs).borrow_mut().as_mut() {
-                // Simple busy check
-                if RX_STATE.borrow(cs).borrow().is_some() {
-                    return;
-                }
-                // setup the tx state
-                let state = RxState::new(buffer);
-                // set the state
-                *RX_STATE.borrow(cs).borrow_mut() = Some(state);
-                // enable receive interrupts
-                usb.rx_int_enable();
-            }
-        });
+            // return a future
+            UsbTxFuture
+        })
     }
 }
 
@@ -353,8 +406,6 @@ impl Driver for UsbDriver {
 //to flush the FT240s tx FIFO to the host and disable the tx interrupts.
 #[avr_device::interrupt(at90can128)]
 fn INT5() {
-    // Forge a token. This is safe ONLY because we are in an ISR.
-    let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
     // Forge a token. This is safe ONLY because we are in an ISR.
     let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
     // get the driver
@@ -380,8 +431,8 @@ fn INT5() {
         None => {
             // we have no buffer, disable interrupts
             usb.rx_int_disable();
-            // take/drop the transfer buffer
-            // _ = TX_STATE.borrow(cs).take();
+            // set the result
+            tx_state.result = Some(Err(DriverError::MissingGlobalBuffer));
             // kick the waker if its set
             if let Some(waker) = tx_state.waker.take() {
                 waker.wake();
@@ -390,16 +441,18 @@ fn INT5() {
         }
     };
     // grab the next byte
-    if let Some(byte) = tx_buffer.read_byte() {
+    match tx_buffer.read_byte() {
         // write it
-        usb.write_byte(byte);
-    } else {
-        // flush the data to the host
-        usb.flush();
-        // disable transmit interrupts
-        usb.tx_int_disable();
-        // take/drop the transfer buffer
-        // _ = TX_STATE.borrow(cs).take();
+        Some(byte) => usb.write_byte(byte),
+        // all done
+        None => {
+            // flush the data to the host
+            usb.flush();
+            // disable transmit interrupts
+            usb.tx_int_disable();
+            // update the state that we are done
+            tx_state.result = Some(Ok(()));
+        }
     }
     // kick the waker if its set
     if let Some(waker) = tx_state.waker.take() {
@@ -435,6 +488,7 @@ fn INT6() {
         None => {
             // we have no buffer, disable interrupts
             usb.rx_int_disable();
+
             // kick the waker if its set
             if let Some(waker) = rx_state.waker.take() {
                 waker.wake();

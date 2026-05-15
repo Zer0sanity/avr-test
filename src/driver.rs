@@ -4,6 +4,8 @@ use core::task::Waker;
 pub struct TxState {
     // store the buffer handle to our backing memory
     pub buffer: Option<BufferHandle>,
+    // result set by the isr when transmit is complete or errors encountered
+    pub result: Option<Result<(), DriverError>>,
     // waker to notify we're free to transmit
     pub waker: Option<Waker>,
 }
@@ -12,6 +14,15 @@ impl TxState {
     pub fn new(buffer: BufferHandle) -> Self {
         Self {
             buffer: Some(buffer),
+            result: None,
+            waker: None,
+        }
+    }
+
+    pub fn error(buffer: BufferHandle, error: DriverError) -> Self {
+        Self {
+            buffer: Some(buffer),
+            result: Some(Err(error)),
             waker: None,
         }
     }
@@ -39,11 +50,16 @@ pub enum DriverError {
     MissingGlobalState,
     MissingGlobalBuffer,
     MissingFutureBuffer,
+    BufferEmpty,
 }
 
 pub trait Driver {
-    fn tx_submit(&mut self, buffer_handle: BufferHandle);
-    fn rx_submit(&mut self, buffer_handle: BufferHandle);
+    type RxFuture: Future<Output = Result<BufferHandle, DriverError>>;
+    type TxFuture: Future<Output = Result<BufferHandle, DriverError>>;
+
+    fn init(&mut self, buffer_handle: BufferHandle);
+    fn read(&mut self, buffer_handle: BufferHandle) -> Self::RxFuture;
+    fn write(&mut self, buffer_handle: BufferHandle) -> Self::TxFuture;
 }
 
 // Local Variables:
