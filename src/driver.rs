@@ -33,6 +33,8 @@ pub struct RxState {
     pub buffer: Option<BufferHandle>,
     // waker to notify data is available to read
     pub waker: Option<Waker>,
+    // error status
+    pub error: Option<DriverError>,
 }
 
 impl RxState {
@@ -40,6 +42,7 @@ impl RxState {
         Self {
             buffer: Some(buffer),
             waker: None,
+            error: None,
         }
     }
 }
@@ -51,6 +54,7 @@ pub enum DriverError {
     MissingGlobalBuffer,
     MissingFutureBuffer,
     BufferEmpty,
+    InsufficientSpace,
 }
 
 impl fmt::Display for DriverError {
@@ -61,6 +65,7 @@ impl fmt::Display for DriverError {
             DriverError::MissingGlobalBuffer => "MissingGlobalBuffer",
             DriverError::MissingFutureBuffer => "MissingFutureBuffer",
             DriverError::BufferEmpty => "BufferEmpty",
+            DriverError::InsufficientSpace => "InsufficientSpace",
         };
         write!(f, "{}", txt)
     }

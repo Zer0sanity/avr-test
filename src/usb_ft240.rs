@@ -111,6 +111,14 @@ impl UsbFT240 {
             .write(|w| unsafe { w.intf().bits(RX_EXT_INT6) });
     }
 
+    // check receive interrupts
+    #[inline(always)]
+    pub fn rx_int_enabled(&self) -> bool {
+        let ext_int = unsafe { &*self.ext_int_ptr };
+        // disable interrupts
+        ext_int.eimsk().read().int().bits() & RX_EXT_INT6 != 0
+    }
+
     // enable transmit interrupts
     #[inline(always)]
     pub fn tx_int_enable(&self) {
@@ -144,7 +152,7 @@ impl UsbFT240 {
             .write(|w| unsafe { w.intf().bits(TX_EXT_INT5) });
     }
 
-    // disable transmit interrupts
+    // check transmit interrupts
     #[inline(always)]
     pub fn tx_int_enabled(&self) -> bool {
         let ext_int = unsafe { &*self.ext_int_ptr };
@@ -234,6 +242,7 @@ pub struct UsbDriver;
 
 pub struct UsbRxFuture {
     buffer: Option<BufferHandle>,
+    last_length: u8,
 }
 
 impl Future for UsbRxFuture {
@@ -241,19 +250,6 @@ impl Future for UsbRxFuture {
     fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // go interrupt free while checking for packet
         avr_device::interrupt::free(|cs| {
-            // its possible that we could get polled again after returning ready.  so, ensure we have
-            // buffer to receive bytes into. since we take and return the buffer after detecting a packet
-            // it will be none.
-            let packet_buffer = match self.buffer.as_mut() {
-                Some(buffer) => buffer,
-                None => return Poll::Ready(Err(DriverError::MissingFutureBuffer)),
-            };
-            // get the driver
-            let mut usb_lock = USB.borrow(cs).borrow_mut();
-            let usb = match usb_lock.as_mut() {
-                Some(driver) => driver,
-                None => return Poll::Ready(Err(DriverError::MissingDriver)),
-            };
             // get the state
             let mut state_lock = RX_STATE.borrow(cs).borrow_mut();
             // get the rx state
@@ -261,10 +257,36 @@ impl Future for UsbRxFuture {
                 Some(state) => state,
                 None => return Poll::Ready(Err(DriverError::MissingGlobalState)),
             };
+            // // see if there was an error
+            // if (rx_state.error.is_some()) {
+            //     return Poll::Ready(Err(rx_state.error.take().unwrap()));
+            // }
             // get the rx buffer
             let rx_buffer = match rx_state.buffer.as_mut() {
                 Some(buffer) => buffer,
                 None => return Poll::Ready(Err(DriverError::MissingGlobalBuffer)),
+            };
+            // // get the driver
+            // let mut usb_lock = USB.borrow(cs).borrow_mut();
+            // let usb = match usb_lock.as_mut() {
+            //     Some(driver) => driver,
+            //     None => return Poll::Ready(Err(DriverError::MissingDriver)),
+            // };
+            // // see if any bytes were received since the last time we polled
+            // if self.last_length == rx_buffer.len() {
+            //     // rx_buffer is empty, ensure interrupts are enabled
+            //     usb.rx_int_enable();
+            //     //register the waker
+            //     rx_state.waker = Some(cx.waker().clone());
+            //     // poll pending
+            //     return Poll::Pending;
+            // }
+            // its possible that we could get polled again after returning ready.  so, ensure we have
+            // buffer to receive bytes into. since we take and return the buffer after detecting a packet
+            // it will be none.
+            let packet_buffer = match self.buffer.as_mut() {
+                Some(buffer) => buffer,
+                None => return Poll::Ready(Err(DriverError::MissingFutureBuffer)),
             };
             // while there are bytes to read and we haven't read a packer
             while let Some(byte) = rx_buffer.read_byte_wrapped() {
@@ -273,13 +295,15 @@ impl Future for UsbRxFuture {
                 // if a packet was read
                 if byte == 0x0d {
                     // ensure interrupts are enabled
-                    usb.rx_int_enable();
+                    // usb.rx_int_enable();
                     // return the packet buffer
                     return Poll::Ready(Ok(self.buffer.take().unwrap()));
                 }
             }
+            // set the last length
+            // self.last_length = rx_buffer.len();
             // rx_buffer is empty, ensure interrupts are enabled
-            usb.rx_int_enable();
+            // usb.rx_int_enable();
             //register the waker
             rx_state.waker = Some(cx.waker().clone());
             // poll pending
@@ -296,6 +320,11 @@ impl Future for UsbTxFuture {
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // go interrupt free while checking for packet
         avr_device::interrupt::free(|cs| {
+            let mut usb_lock = USB.borrow(cs).borrow_mut();
+            let usb = match usb_lock.as_mut() {
+                Some(driver) => driver.tx_int_enabled(),
+                None => true,
+            };
             // get the state
             let mut state_lock = TX_STATE.borrow(cs).borrow_mut();
             // get the tx state
@@ -303,29 +332,49 @@ impl Future for UsbTxFuture {
                 Some(state) => state,
                 None => return Poll::Ready(Err(DriverError::MissingGlobalState)),
             };
-            // if the result is set the transmission completed or had errors
-            if tx_state.result.is_some() {
-                // take the state
-                let mut state = state_lock.take().unwrap();
-                // take the result
-                let result = state.result.take().unwrap();
-                // check the result
-                if result.is_ok() {
-                    // take the buffer
-                    let tx_buffer = state.buffer.take();
-                    return match tx_buffer {
-                        Some(buffer) => Poll::Ready(Ok(buffer)),
-                        None => Poll::Ready(Err(DriverError::MissingGlobalBuffer)),
-                    };
-                } else {
-                    return Poll::Ready(Err(result.unwrap_err()));
+
+            return if !usb {
+                match tx_state.buffer.take() {
+                    Some(b) => Poll::Ready(Ok(b)),
+                    None => Poll::Ready(Err(DriverError::MissingGlobalBuffer)),
                 }
             } else {
                 //register the waker
                 tx_state.waker = Some(cx.waker().clone());
                 // poll pending
-                return Poll::Pending;
-            }
+                Poll::Pending
+            };
+
+            // // get the state
+            // let mut state_lock = TX_STATE.borrow(cs).borrow_mut();
+            // // get the tx state
+            // let tx_state = match state_lock.as_mut() {
+            //     Some(state) => state,
+            //     None => return Poll::Ready(Err(DriverError::MissingGlobalState)),
+            // };
+            // // if the result is set the transmission completed or had errors
+            // if tx_state.result.is_some() {
+            //     // take the state
+            //     let mut state = state_lock.take().unwrap();
+            //     // take the result
+            //     let result = state.result.take().unwrap();
+            //     // check the result
+            //     if result.is_ok() {
+            //         // take the buffer
+            //         let tx_buffer = state.buffer.take();
+            //         return match tx_buffer {
+            //             Some(buffer) => Poll::Ready(Ok(buffer)),
+            //             None => Poll::Ready(Err(DriverError::MissingGlobalBuffer)),
+            //         };
+            //     } else {
+            //         return Poll::Ready(Err(result.unwrap_err()));
+            //     }
+            // } else {
+            //     //register the waker
+            //     tx_state.waker = Some(cx.waker().clone());
+            //     // poll pending
+            //     return Poll::Pending;
+            // }
         })
     }
 }
@@ -356,6 +405,7 @@ impl Driver for UsbDriver {
         // submits a buffer for the async rx future to receive bytes into
         UsbRxFuture {
             buffer: Some(buffer),
+            last_length: 0,
         }
     }
 
@@ -478,7 +528,7 @@ fn INT6() {
         Some(state) => state,
         None => {
             // we have no state, disable interrupts
-            usb.rx_int_disable();
+            // usb.rx_int_disable();
             return;
         }
     };
@@ -486,13 +536,14 @@ fn INT6() {
     let rx_buffer = match rx_state.buffer.as_mut() {
         Some(buffer) => buffer,
         None => {
-            // we have no buffer, disable interrupts
-            usb.rx_int_disable();
-
+            // set an error
+            rx_state.error = Some(DriverError::MissingGlobalBuffer);
             // kick the waker if its set
             if let Some(waker) = rx_state.waker.take() {
                 waker.wake();
             }
+            // we have no buffer, disable interrupts
+            // usb.rx_int_disable();
             return;
         }
     };
@@ -505,8 +556,10 @@ fn INT6() {
         // write it to the state buffer
         rx_buffer.write_byte(byte);
     } else {
+        // set an error
+        rx_state.error = Some(DriverError::InsufficientSpace);
         // disable interrupts
-        usb.rx_int_disable();
+        // usb.rx_int_disable();
     }
     // kick the waker if its set
     if let Some(waker) = rx_state.waker.take() {

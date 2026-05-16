@@ -75,9 +75,9 @@ impl<const BUFFER_COUNT: usize> BufferAllocator<BUFFER_COUNT> {
 
     pub fn try_alloc(&mut self) -> Result<u8> {
         // do we have buffers any to give out
-        if self.count == 0 {
-            return Err(BufferError::PoolEmpty);
-        }
+        // if self.count == 0 {
+        //     return Err(BufferError::PoolEmpty);
+        // }
         // grab the buffer index
         let index = self.allocations[self.alloc_idx as usize];
         // increment the allocation index
@@ -247,6 +247,11 @@ impl BufferHandle {
             capacity,
             pool_idx,
         }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> u8 {
+        self.len
     }
 
     #[inline(always)]

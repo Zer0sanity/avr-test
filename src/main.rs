@@ -77,16 +77,21 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
     loop {
         // request a buffer for receiving a packet
         led.off();
-        // grab a buffer to read a packet
         let mut rx_buffer = BufferRequest.await;
         let rx_result = usb.read(rx_buffer).await;
+
         led.on();
 
         let tx_buffer = match rx_result {
-            Ok(mut buffer) => {
+            Ok(buf) => {
                 counter += 1;
-                _ = write!(buffer, " count: {}\r\n", counter);
-                buffer.reset();
+
+                let mut buffer = BufferRequest.await;
+                _ = write!(buffer, "Hello, World  fasdfsafsadf {}\r\n", counter);
+
+                // _ = buffer.write(buf.as_slice());
+
+                // _ = write!(buffer, " count: {}\r\n", counter);
                 buffer
             }
             Err(err) => {
@@ -96,7 +101,7 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
                 buffer
             }
         };
-
+        // Timer::delay(50).await;
         let _ = usb.write(tx_buffer).await;
     }
 }

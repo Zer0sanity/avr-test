@@ -70,7 +70,7 @@ impl<F: Future> Executor<F> {
                 match pinned_future.as_mut().poll(&mut cx) {
                     Poll::Ready(_) => break, // Task finished
                     Poll::Pending => {
-                        avr_device::asm::sleep();
+                        // avr_device::asm::sleep();
                     }
                 }
             }
