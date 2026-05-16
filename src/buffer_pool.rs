@@ -2,7 +2,7 @@ use core::{
     cell::RefCell,
     error::Error,
     fmt::{self, Write},
-    // ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut},
     pin::Pin,
     task::{Context, Poll, Waker},
 };
@@ -18,11 +18,25 @@ pub enum BufferError {
     PoolEmpty,
     AlreadyDeallocated,
     InvalidIndex,
+    InsufficientSpace,
 }
 
 impl fmt::Display for BufferError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Custom error occurred")
+        let txt = match self {
+            BufferError::PoolFull => "PoolFull",
+            BufferError::PoolEmpty => "PoolEmpty",
+            BufferError::AlreadyDeallocated => "AlreadyDeallocated",
+            BufferError::InvalidIndex => "InvalidIndex",
+            BufferError::InsufficientSpace => "InsufficientSpace",
+        };
+        write!(f, "{}", txt)
+    }
+}
+
+impl From<BufferError> for fmt::Error {
+    fn from(_err: BufferError) -> Self {
+        fmt::Error
     }
 }
 
@@ -157,6 +171,14 @@ impl BufferRequest {
                 .map(|_| buffer_pool.waker.take().map(|w| w.wake()));
             // return
             result
+        })
+    }
+
+    pub fn free_buffers() -> u8 {
+        avr_device::interrupt::free(|cs| {
+            // get the pool
+            let mut buffer_pool = BUFFER_POOL.borrow(cs).borrow_mut();
+            buffer_pool.allocator.count
         })
     }
 }
@@ -302,7 +324,7 @@ impl BufferHandle {
         // did the index hit the capacity
         if self.read_idx == self.capacity {
             // wrap it back to the beginning
-            self.write_idx = 0;
+            self.read_idx = 0;
         }
         // decrement the length
         self.len -= 1;
@@ -330,37 +352,28 @@ impl BufferHandle {
     }
 
     #[inline(always)]
-    pub fn write(&mut self, bytes: &[u8]) {
+    pub fn write(&mut self, bytes: &[u8]) -> Result<u8> {
         // get the length
         let len = bytes.len() as u8;
         // first see if it will fit
         if self.free_space() < len {
-            return;
+            return Err(BufferError::InsufficientSpace);
         }
         // get a mutable slice and write the bytes
-        self.as_mut_slice().copy_from_slice(bytes);
+        self.as_mut_slice()[..len as usize].copy_from_slice(bytes);
         // update the write index
         self.write_idx += len;
         // increment the length
         self.len += len;
+        // return the len
+        Ok(len)
     }
 }
 
 impl Write for BufferHandle {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        // get the bytes representation of the string
-        let bytes = s.as_bytes();
-        let len = bytes.len() as u8;
-        // first see if it will fit
-        if self.free_space() < len {
-            return Err(fmt::Error);
-        }
-        // get a mutable slice and write the bytes
-        self.as_mut_slice().copy_from_slice(bytes);
-        // update the write index
-        self.write_idx += len;
-        // increment the length
-        self.len += len;
+        // just use the buffer handle write
+        _ = self.write(s.as_bytes())?;
         Ok(())
     }
 }
@@ -371,19 +384,19 @@ impl Drop for BufferHandle {
     }
 }
 
-// impl Deref for BufferHandle {
-//     type Target = [u8];
-//     fn deref(&self) -> &Self::Target {
-//         self.slice
-//     }
-// }
+impl Deref for BufferHandle {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
 
-// impl DerefMut for BufferHandle {
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         self.slice
-//     }
-// }
+impl DerefMut for BufferHandle {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
+    }
+}
 
 // Local Variables:
-// jinx-local-words: "idx len"
+// jinx-local-words: "Deallocated idx len"
 // End:

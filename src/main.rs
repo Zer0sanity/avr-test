@@ -61,7 +61,7 @@ fn main() -> ! {
 }
 
 pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
-    let counter: u16 = 0;
+    let mut counter: u16 = 0;
 
     led.on();
 
@@ -70,40 +70,34 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
     // submit it to the driver
     usb.init(rx_buffer);
 
-    // let mut hello = BufferRequest.await;
-    // _ = write!(hello, "Hello, World {}\r\n", counter);
-    // _ = usb.write(hello).await;
+    let mut hello = BufferRequest.await;
+    _ = write!(hello, "Hello, World {}\r\n", counter);
+    let _ = usb.write(hello).await;
 
     loop {
-        // Timer::delay(1000).await;
-        led.off();
-
         // request a buffer for receiving a packet
-        let packet_buffer = BufferRequest.await;
+        led.off();
+        // grab a buffer to read a packet
+        let mut rx_buffer = BufferRequest.await;
+        let rx_result = usb.read(rx_buffer).await;
         led.on();
 
-        let packet_result = usb.read(packet_buffer).await;
+        let tx_buffer = match rx_result {
+            Ok(mut buffer) => {
+                counter += 1;
+                _ = write!(buffer, " count: {}\r\n", counter);
+                buffer.reset();
+                buffer
+            }
+            Err(err) => {
+                let mut buffer = BufferRequest.await;
+                let count = BufferRequest::free_buffers();
+                _ = write!(buffer, "ERROR {}, count: {}\r\n", err, count);
+                buffer
+            }
+        };
 
-        if let Ok(mut buffer) = packet_result {
-            // send it
-            buffer.write_byte(0x0d);
-            buffer.reset();
-            let _ = usb.write(buffer).await;
-        }
-        // let mut buffer = BufferRequest.await;
-
-        // if led.is_on() {
-        //     led.off();
-        //     // _ = write!(buffer, "OFF: {}\r\n", counter);
-        //     // usb.tx_submit(buffer);
-        // } else {
-        //     led.on();
-        //     // _ = write!(buffer, "ON: {}\r\n", counter);
-        //     // usb.tx_submit(buffer);
-        // }
-        // Timer::delay(250).await;
-
-        // QUEUE.push(5).await;
+        let _ = usb.write(tx_buffer).await;
     }
 }
 

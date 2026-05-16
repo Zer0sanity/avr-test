@@ -1,5 +1,5 @@
 use crate::BufferHandle;
-use core::task::Waker;
+use core::{fmt, task::Waker};
 
 pub struct TxState {
     // store the buffer handle to our backing memory
@@ -51,6 +51,19 @@ pub enum DriverError {
     MissingGlobalBuffer,
     MissingFutureBuffer,
     BufferEmpty,
+}
+
+impl fmt::Display for DriverError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let txt = match self {
+            DriverError::MissingDriver => "MissingDriver",
+            DriverError::MissingGlobalState => "MissingGlobalState",
+            DriverError::MissingGlobalBuffer => "MissingGlobalBuffer",
+            DriverError::MissingFutureBuffer => "MissingFutureBuffer",
+            DriverError::BufferEmpty => "BufferEmpty",
+        };
+        write!(f, "{}", txt)
+    }
 }
 
 pub trait Driver {
