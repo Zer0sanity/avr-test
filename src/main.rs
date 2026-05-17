@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 #![feature(abi_avr_interrupt)]
+#![cfg_attr(target_arch = "avr", feature(asm_experimental_arch))]
 use core::{fmt::Write, panic::PanicInfo};
 
 use avr_device::at90can128;
@@ -33,16 +34,7 @@ fn main() -> ! {
     let err_led = LED::new(pins.pb6.into_output().downgrade(), true);
     let can_led = LED::new(pins.pb7.into_output().downgrade(), true);
 
-    let usb = UsbFT240::init(
-        pins.pe2.into_output().downgrade(),
-        pins.pe4.into_output().downgrade(),
-        pins.pe7.into_output().downgrade(),
-        pins.pe5.into_floating_input().downgrade().forget_imode(),
-        pins.pe6.into_floating_input().downgrade().forget_imode(),
-        pins.pg2.into_floating_input().downgrade().forget_imode(),
-        at90can128::PORTC::ptr(),
-        at90can128::EXINT::ptr(),
-    );
+    let usb = UsbFT240::init();
 
     Timer::init(&dp.TC1);
 
@@ -71,7 +63,7 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
     usb.init(rx_buffer);
 
     let mut hello = BufferRequest.await;
-    _ = write!(hello, "Hello, World {}\r\n", counter);
+    _ = write!(hello, "Hello, World 123{}\r\n", counter);
     let _ = usb.write(hello).await;
 
     loop {
