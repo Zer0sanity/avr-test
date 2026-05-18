@@ -336,6 +336,9 @@ impl UsbFT240 {
         result != 0
     }
 
+    // This sub will preform the required operation to read a byte to the FT240.
+    // NOTE:  This sub is not thread safe and should be called with interrupts disabled if interrupts are being used.
+    // TODO: HOT make this one inline assembly block
     #[inline(always)]
     pub fn read_byte() -> u8 {
         // After every RX or TX operation we reconfigure the data bus as inputs pulled up.  Therefore the ports DDR should already
@@ -355,8 +358,9 @@ impl UsbFT240 {
         data
     }
 
-    // This sub will preform the required operation to transmit byte to the FT240.
+    // This sub will preform the required operation to transmit a byte to the FT240.
     // NOTE:  This sub is not thread safe and should be called with interrupts disabled if interrupts are being used.
+    // TODO: HOT make this one inline assembly block
     #[inline(always)]
     pub fn write_byte(data: u8) {
         // someone is going to cringe, but real men are unsafe
