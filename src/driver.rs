@@ -3,7 +3,7 @@ use core::{fmt, task::Waker};
 
 pub struct TxState {
     // store the buffer handle to our backing memory
-    pub buffer: Option<BufferHandle>,
+    pub buffer: BufferHandle,
     // result set by the isr when transmit is complete or errors encountered
     pub result: Option<Result<(), DriverError>>,
     // waker to notify we're free to transmit
@@ -13,7 +13,7 @@ pub struct TxState {
 impl TxState {
     pub fn new(buffer: BufferHandle) -> Self {
         Self {
-            buffer: Some(buffer),
+            buffer: buffer,
             result: None,
             waker: None,
         }
@@ -21,7 +21,7 @@ impl TxState {
 
     pub fn error(buffer: BufferHandle, error: DriverError) -> Self {
         Self {
-            buffer: Some(buffer),
+            buffer: buffer,
             result: Some(Err(error)),
             waker: None,
         }
@@ -30,7 +30,7 @@ impl TxState {
 
 pub struct RxState {
     // store the buffer handle to our backing memory
-    pub buffer: Option<BufferHandle>,
+    pub buffer: BufferHandle,
     // waker to notify data is available to read
     pub waker: Option<Waker>,
     // error status
@@ -40,7 +40,7 @@ pub struct RxState {
 impl RxState {
     pub fn new(buffer: BufferHandle) -> Self {
         Self {
-            buffer: Some(buffer),
+            buffer: buffer,
             waker: None,
             error: None,
         }

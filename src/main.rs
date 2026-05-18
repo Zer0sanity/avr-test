@@ -87,6 +87,7 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
                 buffer
             }
             Err(err) => {
+                led.on();
                 let mut buffer = BufferRequest.await;
                 let count = BufferRequest::free_buffers();
                 _ = write!(buffer, "ERROR {}, count: {}\r\n", err, count);
