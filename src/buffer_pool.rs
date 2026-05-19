@@ -402,6 +402,185 @@ impl DerefMut for BufferHandle {
     }
 }
 
+// because buffer handle
+unsafe impl Send for BufferHandle2 {}
+unsafe impl Sync for BufferHandle2 {}
+
+pub struct BufferHandle2 {
+    // pointer to the start of the buffer
+    start_ptr: *mut u8,
+    // pointer to the end of the buffer
+    end_ptr: *mut u8,
+    // buffer capacity
+    capacity: u8,
+    // read pointer
+    read_ptr: *mut u8,
+    // write pointer
+    write_ptr: *mut u8,
+    // index to return to buffer pool
+    pool_idx: u8,
+}
+
+impl BufferHandle2 {
+    pub fn new(ptr: *mut u8, capacity: u8, pool_idx: u8) -> Self {
+        Self {
+            start_ptr: ptr,
+            end_ptr: unsafe { ptr.add(capacity as usize) },
+            capacity,
+            read_ptr: ptr,
+            write_ptr: ptr,
+            pool_idx,
+        }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> u8 {
+        // convert the the pointer addresses into u8's
+        let write_addr = self.write_ptr.addr() as u8;
+        let read_addr = self.read_ptr.addr() as u8;
+        // simple wrapping subtract will get us the length
+        write_addr.wrapping_sub(read_addr)
+    }
+
+    #[inline(always)]
+    pub fn free_space(&self) -> u8 {
+        self.capacity - self.len()
+    }
+
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        self.read_ptr = self.start_ptr;
+        self.write_ptr = self.start_ptr;
+    }
+
+    #[inline(always)]
+    /// there will be issues with this since there is no way to update read_idx or len
+    pub fn as_slice(&self) -> &[u8] {
+        // get a slice for reading based off the read_idx
+        unsafe {
+            let ptr = self.read_ptr;
+            let len = self.end_ptr.offset_from_unsigned(self.read_ptr);
+            core::slice::from_raw_parts(ptr, len)
+        }
+    }
+
+    #[inline(always)]
+    /// there will be issues with this since there is no way to update write_idx or len
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        // get a slice for writing based off write index
+        unsafe {
+            let ptr = self.write_ptr;
+            let len = self.end_ptr.offset_from_unsigned(self.write_ptr);
+            core::slice::from_raw_parts_mut(ptr, len)
+        }
+    }
+
+    #[inline(always)]
+    pub fn read_byte(&mut self) -> Option<u8> {
+        // is there anything to read
+        if self.read_ptr.addr() == self.write_ptr.addr() {
+            return None;
+        }
+        // read a byte
+        let byte = unsafe { self.read_ptr.read_volatile() };
+        // update the read pointer
+        self.read_ptr = unsafe { self.read_ptr.add(1) };
+        // return the next byte
+        Some(byte)
+    }
+
+    #[inline(always)]
+    pub fn write_byte(&mut self, byte: u8) {
+        // are we full
+        if self.write_ptr.addr() == self.end_ptr.addr() {
+            return;
+        }
+        // write the byte
+        unsafe { self.write_ptr.write_volatile(byte) };
+        // update the write pointer
+        self.write_ptr = unsafe { self.write_ptr.add(1) };
+    }
+
+    #[inline(always)]
+    pub fn read_byte_wrapped(&mut self) -> Option<u8> {
+        // is there anything to read
+        if self.read_ptr.addr() == self.write_ptr.addr() {
+            return None;
+        }
+        // read a byte
+        let byte = unsafe { self.read_ptr.read_volatile() };
+        // update the read pointer
+        self.read_ptr = unsafe { self.read_ptr.add(1) };
+        // check for wrapping
+        if self.read_ptr.addr() == self.end_ptr.addr() {
+            self.read_ptr = self.start_ptr;
+        }
+        // return the next byte
+        Some(byte)
+    }
+
+    #[inline(always)]
+    pub fn write_byte_wrapped(&mut self, byte: u8) {
+        // get the next write position
+        let mut next_write_ptr = unsafe { self.write_ptr.add(1) };
+        // check for wrapping
+        if next_write_ptr.addr() == self.end_ptr.addr() {
+            next_write_ptr = self.start_ptr;
+        }
+        // if the next write position equals the read position we are full
+        if next_write_ptr.addr() == self.read_ptr.addr() {
+            return;
+        }
+        // write the byte
+        unsafe { self.write_ptr.write_volatile(byte) };
+        // update the write pointer
+        self.write_ptr = next_write_ptr;
+    }
+
+    #[inline(always)]
+    pub fn write(&mut self, bytes: &[u8]) -> Result<u8> {
+        // get the length
+        let len = bytes.len();
+        // first see if it will fit
+        if self.free_space() < len as u8 {
+            return Err(BufferError::InsufficientSpace);
+        }
+        // get a mutable slice and write the bytes
+        self.as_mut_slice()[..len as usize].copy_from_slice(bytes);
+        // update the write pointer
+        self.write_ptr = unsafe { self.write_ptr.add(len) };
+        // return the len
+        Ok(len as u8)
+    }
+}
+
+impl Write for BufferHandle2 {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        // just use the buffer handle write
+        _ = self.write(s.as_bytes())?;
+        Ok(())
+    }
+}
+
+impl Drop for BufferHandle2 {
+    fn drop(&mut self) {
+        _ = BufferRequest::release_buffer(self.pool_idx);
+    }
+}
+
+impl Deref for BufferHandle2 {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl DerefMut for BufferHandle2 {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
+    }
+}
+
 // Local Variables:
 // jinx-local-words: "Deallocated idx len"
 // End:

@@ -47,9 +47,6 @@ impl UsbFT240 {
         UsbFT240::configure_bus_as_input();
         UsbFT240::enable_bus_pullups();
 
-        // set the shared instance
-        // avr_device::interrupt::free(|cs| *USB.borrow(cs).borrow_mut() = Some(usb));
-
         // a usb driver
         UsbDriver
     }
