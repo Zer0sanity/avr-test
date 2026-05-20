@@ -47,6 +47,10 @@ impl UsbFT240 {
         UsbFT240::configure_bus_as_input();
         UsbFT240::enable_bus_pullups();
 
+        // setup the interrupts
+        UsbFT240::rx_int_setup();
+        UsbFT240::tx_int_setup();
+
         // a usb driver
         UsbDriver
     }
@@ -58,9 +62,9 @@ impl UsbFT240 {
         UsbFT240::sense_is_high()
     }
 
-    // enable receive interrupts
+    // setup receive interrupts
     #[inline(always)]
-    pub fn rx_int_enable() {
+    pub fn rx_int_setup() {
         // initialize receive interrupts
         let ext_int = unsafe { &*UsbFT240::EXT_INT_PTR };
         // setup RXF(PE6/INT6) to trigger on falling edges
@@ -71,6 +75,13 @@ impl UsbFT240 {
         ext_int
             .eifr()
             .write(|w| unsafe { w.intf().bits(UsbFT240::RX_EXT_INT6) });
+    }
+
+    // enable receive interrupts
+    #[inline(always)]
+    pub fn rx_int_enable() {
+        // initialize receive interrupts
+        let ext_int = unsafe { &*UsbFT240::EXT_INT_PTR };
         // enable interrupts
         ext_int
             .eimsk()
@@ -101,7 +112,7 @@ impl UsbFT240 {
 
     // enable transmit interrupts
     #[inline(always)]
-    pub fn tx_int_enable() {
+    pub fn tx_int_setup() {
         // initialize external interrupts
         let ext_int = unsafe { &*UsbFT240::EXT_INT_PTR };
         // setup TXE(PE5/INT5) to trigger on falling edges
@@ -112,6 +123,13 @@ impl UsbFT240 {
         ext_int
             .eifr()
             .write(|w| unsafe { w.intf().bits(UsbFT240::TX_EXT_INT5) });
+    }
+
+    // enable transmit interrupts
+    #[inline(always)]
+    pub fn tx_int_enable() {
+        // initialize external interrupts
+        let ext_int = unsafe { &*UsbFT240::EXT_INT_PTR };
         // enable interrupts so we get interrupted when the FT240 can accept the next byte
         ext_int
             .eimsk()
@@ -432,39 +450,29 @@ impl Future for UsbRxFuture {
                 None => return Poll::Ready(Err(DriverError::MissingFutureBuffer)),
             };
             // while there are bytes to read and we haven't read a packer
-            let packet_buffer = loop {
-                if let Some(byte) = rx_state.buffer.read_byte_wrapped() {
-                    // write the byte
-                    rx_buffer.write_byte(byte);
-                    // if a packet was read
-                    if byte == 0x0d {
-                        // ensure interrupts are enabled
-                        UsbFT240::rx_int_enable();
-                        // return the packet buffer
-                        break Some(self.buffer.take().unwrap());
-                    }
-                } else {
-                    break None;
+            let mut packet_detected = false;
+            // loop while there are bytes to get or a packet was detected
+            while let Some(byte) = rx_state.buffer.read_byte_wrapped() {
+                // write the byte
+                rx_buffer.write_byte(byte);
+                // if a packet was read
+                if byte == 0x0d {
+                    // set the packet found flag
+                    packet_detected = true;
+                    // exit the loop
+                    break;
                 }
-            };
-            // state buffer is empty, or we got a packet.  handle any rx errors
-            match rx_state.error.take() {
-                // buffer filled up, just re-enable interrupts
-                Some(DriverError::InsufficientSpace) => {
-                    UsbFT240::rx_int_enable();
-                    rx_state.error = None;
-                }
-                _ => (),
             }
+            // ensure interrupts are enabled
+            UsbFT240::rx_int_enable();
             // finish up
-            match packet_buffer {
-                Some(buffer) => Poll::Ready(Ok(buffer)),
-                None => {
-                    //register the waker
-                    rx_state.waker = Some(cx.waker().clone());
-                    // poll pending
-                    Poll::Pending
-                }
+            if packet_detected {
+                Poll::Ready(Ok(self.buffer.take().unwrap()))
+            } else {
+                // register the waker
+                rx_state.waker = Some(cx.waker().clone());
+                // poll pending
+                Poll::Pending
             }
         })
     }
@@ -535,10 +543,9 @@ impl Driver for UsbDriver {
     fn write(&mut self, mut buffer: BufferHandle) -> Self::TxFuture {
         // go interrupt free while updating state
         avr_device::interrupt::free(|cs| {
-            // wait for txe to go low
-            while UsbFT240::txe_is_high() {}
-            // grab
+            // grab the first byte
             match buffer.read_byte() {
+                // if its some
                 Some(byte) => {
                     // set the state
                     *TX_STATE.borrow(cs).borrow_mut() = Some(TxState::new(buffer));
@@ -591,11 +598,11 @@ fn INT5() {
             UsbFT240::tx_int_disable();
             // update the state that we are done
             tx_state.result = Some(Ok(()));
+            // kick the waker if its set
+            if let Some(waker) = tx_state.waker.take() {
+                waker.wake();
+            }
         }
-    }
-    // kick the waker if its set
-    if let Some(waker) = tx_state.waker.take() {
-        waker.wake();
     }
 }
 

@@ -6,25 +6,25 @@ use core::{fmt::Write, panic::PanicInfo};
 
 use avr_device::at90can128;
 use hal::Pins;
+pub mod async_queue;
+pub mod buffer_handle;
+pub mod buffer_pool;
 pub mod driver;
 pub mod executor;
 pub mod hal;
 pub mod led;
 pub mod timer;
-pub mod wait_pin_state;
-// pub mod usb_driver;
-pub mod async_queue;
-pub mod buffer_pool;
 pub mod usb_ft240;
+pub mod wait_pin_state;
 
+pub use buffer_handle::*;
+pub use buffer_pool::*;
+pub use driver::*;
 pub use executor::*;
 pub use led::*;
 pub use timer::*;
-pub use wait_pin_state::*;
-// pub use usb_driver::*;
-pub use buffer_pool::*;
-pub use driver::*;
 pub use usb_ft240::*;
+pub use wait_pin_state::*;
 
 #[avr_device::entry]
 fn main() -> ! {
@@ -69,21 +69,21 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
     loop {
         // request a buffer for receiving a packet
         led.off();
-        let mut rx_buffer = BufferRequest.await;
+        let rx_buffer = BufferRequest.await;
         let rx_result = usb.read(rx_buffer).await;
 
         led.on();
 
         let tx_buffer = match rx_result {
-            Ok(buf) => {
+            Ok(mut buf) => {
                 counter += 1;
 
                 let mut buffer = BufferRequest.await;
-                _ = write!(buffer, "Hello, World  fasdfsafsadf {}\r\n", counter);
+                buffer.write(&buf.as_slice()[..buf.len() - 1]);
+                // _ = write!(buffer, "{}", buf.as_slice());
+                _ = write!(buffer, "count: {}\r\n", buf.len());
+                _ = write!(buffer, "count: {}\r\n", buf.len());
 
-                // _ = buffer.write(buf.as_slice());
-
-                // _ = write!(buffer, " count: {}\r\n", counter);
                 buffer
             }
             Err(err) => {
