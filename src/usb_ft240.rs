@@ -1,4 +1,6 @@
 use crate::BufferHandle;
+use crate::CircularBuffer;
+use crate::FlatBuffer;
 use crate::driver::*;
 use core::cell::RefCell;
 use core::task::{Context, Poll};
@@ -426,12 +428,12 @@ static RX_STATE: Mutex<RefCell<Option<RxState>>> = Mutex::new(RefCell::new(None)
 pub struct UsbDriver;
 
 pub struct UsbRxFuture {
-    buffer: Option<BufferHandle>,
+    buffer: Option<FlatBuffer>,
     last_length: u8,
 }
 
 impl Future for UsbRxFuture {
-    type Output = Result<BufferHandle, DriverError>;
+    type Output = Result<FlatBuffer, DriverError>;
     fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // go interrupt free while checking for packet
         avr_device::interrupt::free(|cs| {
@@ -452,7 +454,7 @@ impl Future for UsbRxFuture {
             // while there are bytes to read and we haven't read a packer
             let mut packet_detected = false;
             // loop while there are bytes to get or a packet was detected
-            while let Some(byte) = rx_state.buffer.read_byte_wrapped() {
+            while let Some(byte) = rx_state.buffer.read_byte() {
                 // write the byte
                 rx_buffer.write_byte(byte);
                 // if a packet was read
@@ -481,7 +483,7 @@ impl Future for UsbRxFuture {
 pub struct UsbTxFuture;
 
 impl Future for UsbTxFuture {
-    type Output = Result<BufferHandle, DriverError>;
+    type Output = Result<FlatBuffer, DriverError>;
 
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // go interrupt free while checking for packet
@@ -520,7 +522,7 @@ impl Driver for UsbDriver {
     type RxFuture = UsbRxFuture;
     type TxFuture = UsbTxFuture;
 
-    fn init(&mut self, buffer: BufferHandle) {
+    fn init(&mut self, buffer: CircularBuffer) {
         // go interrupt free while updating state
         avr_device::interrupt::free(|cs| {
             // setup the tx state
@@ -532,7 +534,7 @@ impl Driver for UsbDriver {
         });
     }
 
-    fn read(&mut self, buffer: BufferHandle) -> Self::RxFuture {
+    fn read(&mut self, buffer: FlatBuffer) -> Self::RxFuture {
         // submits a buffer for the async rx future to receive bytes into
         UsbRxFuture {
             buffer: Some(buffer),
@@ -540,7 +542,7 @@ impl Driver for UsbDriver {
         }
     }
 
-    fn write(&mut self, mut buffer: BufferHandle) -> Self::TxFuture {
+    fn write(&mut self, mut buffer: FlatBuffer) -> Self::TxFuture {
         // go interrupt free while updating state
         avr_device::interrupt::free(|cs| {
             // grab the first byte
@@ -629,7 +631,7 @@ fn INT6() {
         // read byte off usb hardware
         let byte = UsbFT240::read_byte();
         // write it to the state buffer
-        rx_state.buffer.write_byte_wrapped(byte);
+        rx_state.buffer.write_byte(byte);
     } else {
         // set an error
         rx_state.error = Some(DriverError::InsufficientSpace);

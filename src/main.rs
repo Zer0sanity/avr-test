@@ -9,8 +9,10 @@ use hal::Pins;
 pub mod async_queue;
 pub mod buffer_handle;
 pub mod buffer_pool;
+pub mod circular_buffer;
 pub mod driver;
 pub mod executor;
+pub mod flat_buffer;
 pub mod hal;
 pub mod led;
 pub mod timer;
@@ -19,8 +21,10 @@ pub mod wait_pin_state;
 
 pub use buffer_handle::*;
 pub use buffer_pool::*;
+pub use circular_buffer::*;
 pub use driver::*;
 pub use executor::*;
+pub use flat_buffer::*;
 pub use led::*;
 pub use timer::*;
 pub use usb_ft240::*;
@@ -58,18 +62,22 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
     led.on();
 
     // request a buffer for usb driver
-    let rx_buffer = BufferRequest.await;
+    let handle = BufferRequest.await;
+    let rx_buffer = handle.into();
     // submit it to the driver
     usb.init(rx_buffer);
 
-    let mut hello = BufferRequest.await;
-    _ = write!(hello, "Hello, World 123{}\r\n", counter);
-    let _ = usb.write(hello).await;
+    let handle = BufferRequest.await;
+    let mut buffer: FlatBuffer = handle.into();
+
+    _ = write!(buffer, "Hello, World 123{}\r\n", counter);
+    let _ = usb.write(buffer).await;
 
     loop {
         // request a buffer for receiving a packet
         led.off();
-        let rx_buffer = BufferRequest.await;
+        let handle = BufferRequest.await;
+        let rx_buffer: FlatBuffer = handle.into();
         let rx_result = usb.read(rx_buffer).await;
 
         led.on();
@@ -78,8 +86,9 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
             Ok(mut buf) => {
                 counter += 1;
 
-                let mut buffer = BufferRequest.await;
-                buffer.write(&buf.as_slice()[..buf.len() - 1]);
+                let handle = BufferRequest.await;
+                let mut buffer: FlatBuffer = handle.into();
+                // buffer.write(&buf.as_slice()[..buf.len() - 1]);
                 // _ = write!(buffer, "{}", buf.as_slice());
                 _ = write!(buffer, "count: {}\r\n", buf.len());
                 _ = write!(buffer, "count: {}\r\n", buf.len());
@@ -88,7 +97,8 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
             }
             Err(err) => {
                 led.on();
-                let mut buffer = BufferRequest.await;
+                let handle = BufferRequest.await;
+                let mut buffer: FlatBuffer = handle.into();
                 let count = BufferRequest::free_buffers();
                 _ = write!(buffer, "ERROR {}, count: {}\r\n", err, count);
                 buffer

@@ -1,9 +1,9 @@
-use crate::BufferHandle;
+use crate::{BufferHandle, CircularBuffer, FlatBuffer};
 use core::{fmt, task::Waker};
 
 pub struct TxState {
     // store the buffer handle to our backing memory
-    pub buffer: BufferHandle,
+    pub buffer: FlatBuffer,
     // result set by the isr when transmit is complete or errors encountered
     pub result: Option<Result<(), DriverError>>,
     // waker to notify we're free to transmit
@@ -11,7 +11,7 @@ pub struct TxState {
 }
 
 impl TxState {
-    pub fn new(buffer: BufferHandle) -> Self {
+    pub fn new(buffer: FlatBuffer) -> Self {
         Self {
             buffer: buffer,
             result: None,
@@ -19,7 +19,7 @@ impl TxState {
         }
     }
 
-    pub fn error(buffer: BufferHandle, error: DriverError) -> Self {
+    pub fn error(buffer: FlatBuffer, error: DriverError) -> Self {
         Self {
             buffer: buffer,
             result: Some(Err(error)),
@@ -30,7 +30,7 @@ impl TxState {
 
 pub struct RxState {
     // store the buffer handle to our backing memory
-    pub buffer: BufferHandle,
+    pub buffer: CircularBuffer,
     // waker to notify data is available to read
     pub waker: Option<Waker>,
     // error status
@@ -38,9 +38,9 @@ pub struct RxState {
 }
 
 impl RxState {
-    pub fn new(buffer: BufferHandle) -> Self {
+    pub fn new(buffer: CircularBuffer) -> Self {
         Self {
-            buffer: buffer,
+            buffer: buffer.into(),
             waker: None,
             error: None,
         }
@@ -72,12 +72,12 @@ impl fmt::Display for DriverError {
 }
 
 pub trait Driver {
-    type RxFuture: Future<Output = Result<BufferHandle, DriverError>>;
-    type TxFuture: Future<Output = Result<BufferHandle, DriverError>>;
+    type RxFuture: Future<Output = Result<FlatBuffer, DriverError>>;
+    type TxFuture: Future<Output = Result<FlatBuffer, DriverError>>;
 
-    fn init(&mut self, buffer_handle: BufferHandle);
-    fn read(&mut self, buffer_handle: BufferHandle) -> Self::RxFuture;
-    fn write(&mut self, buffer_handle: BufferHandle) -> Self::TxFuture;
+    fn init(&mut self, buffer_handle: CircularBuffer);
+    fn read(&mut self, buffer_handle: FlatBuffer) -> Self::RxFuture;
+    fn write(&mut self, buffer_handle: FlatBuffer) -> Self::TxFuture;
 }
 
 // Local Variables:
