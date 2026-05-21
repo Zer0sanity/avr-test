@@ -1,29 +1,34 @@
 #![no_std]
 #![no_main]
 #![feature(abi_avr_interrupt)]
+#![cfg_attr(target_arch = "avr", feature(asm_experimental_arch))]
 use core::{fmt::Write, panic::PanicInfo};
 
 use avr_device::at90can128;
 use hal::Pins;
+pub mod async_queue;
+pub mod buffer_handle;
+pub mod buffer_pool;
+pub mod circular_buffer;
 pub mod driver;
 pub mod executor;
+pub mod flat_buffer;
 pub mod hal;
 pub mod led;
 pub mod timer;
-pub mod wait_pin_state;
-// pub mod usb_driver;
-pub mod async_queue;
-pub mod buffer_pool;
 pub mod usb_ft240;
+pub mod wait_pin_state;
 
+pub use buffer_handle::*;
+pub use buffer_pool::*;
+pub use circular_buffer::*;
+pub use driver::*;
 pub use executor::*;
+pub use flat_buffer::*;
 pub use led::*;
 pub use timer::*;
-pub use wait_pin_state::*;
-// pub use usb_driver::*;
-pub use buffer_pool::*;
-pub use driver::*;
 pub use usb_ft240::*;
+pub use wait_pin_state::*;
 
 #[avr_device::entry]
 fn main() -> ! {
@@ -33,16 +38,7 @@ fn main() -> ! {
     let err_led = LED::new(pins.pb6.into_output().downgrade(), true);
     let can_led = LED::new(pins.pb7.into_output().downgrade(), true);
 
-    let usb = UsbFT240::init(
-        pins.pe2.into_output().downgrade(),
-        pins.pe4.into_output().downgrade(),
-        pins.pe7.into_output().downgrade(),
-        pins.pe5.into_floating_input().downgrade().forget_imode(),
-        pins.pe6.into_floating_input().downgrade().forget_imode(),
-        pins.pg2.into_floating_input().downgrade().forget_imode(),
-        at90can128::PORTC::ptr(),
-        at90can128::EXINT::ptr(),
-    );
+    let usb = UsbFT240::init();
 
     Timer::init(&dp.TC1);
 
@@ -63,48 +59,53 @@ fn main() -> ! {
 pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
     let mut counter: u16 = 0;
 
-    // led.off();
+    led.on();
 
-    // // request a buffer for usb driver
-    // let mut rx_buffer_handle = BufferRequest.await;
-    // // submit it to the driver
-    // usb.rx_submit(rx_buffer_handle);
+    // request a buffer for usb driver
+    let handle = BufferRequest.await;
+    let rx_buffer = handle.into();
+    // submit it to the driver
+    usb.init(rx_buffer);
+
+    let handle = BufferRequest.await;
+    let mut buffer: FlatBuffer = handle.into();
+
+    _ = write!(buffer, "Hello, World 123{}\r\n", counter);
+    let _ = usb.write(buffer).await;
 
     loop {
-        // Timer::delay(1000).await;
-        // led.off();
+        // request a buffer for receiving a packet
+        led.off();
+        let handle = BufferRequest.await;
+        let rx_buffer: FlatBuffer = handle.into();
+        let rx_result = usb.read(rx_buffer).await;
 
-        // // request a buffer for receiving a packet
-        // let mut rx_packet_buffer = BufferRequest.await;
+        led.on();
 
-        // Timer::delay(1000).await;
-        // led.on();
+        let tx_buffer = match rx_result {
+            Ok(mut buf) => {
+                counter += 1;
 
-        // let mut rx_buffer = usb.receive_packet(rx_packet_buffer).await;
+                let handle = BufferRequest.await;
+                let mut buffer: FlatBuffer = handle.into();
+                // buffer.write(&buf.as_slice()[..buf.len() - 1]);
+                // _ = write!(buffer, "{}", buf.as_slice());
+                _ = write!(buffer, "count: {}\r\n", buf.len());
+                _ = write!(buffer, "count: {}\r\n", buf.len());
 
-        // Timer::delay(1000).await;
-        // led.off();
-
-        // // send it
-        // rx_buffer.reset();
-        // usb.tx_submit(rx_buffer);
-
-        // Timer::delay(1000).await;
-        // led.on();
-        // let mut buffer = BufferRequest.await;
-
-        if led.is_on() {
-            led.off();
-            // _ = write!(buffer, "OFF: {}\r\n", counter);
-            // usb.tx_submit(buffer);
-        } else {
-            led.on();
-            // _ = write!(buffer, "ON: {}\r\n", counter);
-            // usb.tx_submit(buffer);
-        }
-        Timer::delay(250).await;
-
-        // QUEUE.push(5).await;
+                buffer
+            }
+            Err(err) => {
+                led.on();
+                let handle = BufferRequest.await;
+                let mut buffer: FlatBuffer = handle.into();
+                let count = BufferRequest::free_buffers();
+                _ = write!(buffer, "ERROR {}, count: {}\r\n", err, count);
+                buffer
+            }
+        };
+        // Timer::delay(50).await;
+        let _ = usb.write(tx_buffer).await;
     }
 }
 
