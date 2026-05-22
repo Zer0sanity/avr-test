@@ -1,7 +1,6 @@
 use core::fmt;
-use embedded_io::{self, Write};
 
-use crate::{BufferError, BufferHandle};
+use crate::BufferError;
 
 type Result<T> = core::result::Result<T, BufferError>;
 
@@ -55,6 +54,15 @@ impl CircularBuffer {
     }
 
     #[inline(always)]
+    pub fn reset(&mut self) -> usize {
+        // reset pointers to the start
+        self.read_ptr = self.start_ptr;
+        self.write_ptr = self.start_ptr;
+        // return the capacity
+        return self.capacity - 1;
+    }
+
+    #[inline(always)]
     pub fn read_byte(&mut self) -> Option<u8> {
         // is there anything to read
         if self.read_ptr == self.write_ptr {
@@ -73,7 +81,7 @@ impl CircularBuffer {
     }
 
     #[inline(always)]
-    pub fn write_byte(&mut self, byte: u8) {
+    pub fn next_write_slot(&mut self) -> Option<&mut u8> {
         // get the next write position
         let mut next_write_ptr = unsafe { self.write_ptr.add(1) };
         // check for wrapping
@@ -82,59 +90,18 @@ impl CircularBuffer {
         }
         // if the next write position equals the read position we are full
         if next_write_ptr == self.read_ptr {
-            return;
+            return None;
         }
-        // write the byte
-        unsafe { self.write_ptr.write_volatile(byte) };
+        // get the slot
+        let slot = unsafe { Some(&mut *self.write_ptr) };
         // update the write pointer
         self.write_ptr = next_write_ptr;
+        // return the slot
+        slot
     }
 
-    // #[inline(always)]
-    // pub fn write(&mut self, bytes: &[u8]) -> Result<usize> {
-    //     // get the length
-    //     let bytes_len = bytes.len();
-    //     // first see if it will fit
-    //     if self.free_space() < bytes_len {
-    //         return Err(BufferError::InsufficientSpace);
-    //     }
-    //     // get the length from the write pointer to the end
-    //     let space_to_end = unsafe { self.end_ptr.offset_from(self.write_ptr) as usize };
-    //     // figure out if we can copy the whole thing or just to the end of the buffer
-    //     let first_copy_len = core::cmp::min(bytes_len, space_to_end);
-    //     unsafe {
-    //         // preform the copy
-    //         core::slice::from_raw_parts_mut(self.write_ptr, first_copy_len)
-    //             .copy_from_slice(&bytes[..first_copy_len]);
-    //         // update the write pointer
-    //         self.write_ptr = self.write_ptr.add(first_copy_len);
-    //         // check for wrapping
-    //         if self.write_ptr == self.end_ptr {
-    //             self.write_ptr = self.start_ptr;
-    //         }
-    //     }
-    //     // figure out if we have a second half to write
-    //     let second_copy_len = bytes_len - first_copy_len;
-    //     if second_copy_len > 0 {
-    //         unsafe {
-    //             // preform the copy
-    //             core::slice::from_raw_parts_mut(self.start_ptr, second_copy_len)
-    //                 .copy_from_slice(&bytes[first_copy_len..]);
-
-    //             // update the write pointer
-    //             self.write_ptr = self.start_ptr.add(second_copy_len);
-    //         }
-    //     }
-    //     // return
-    //     Ok(bytes_len)
-    // }
-}
-
-impl embedded_io::ErrorType for CircularBuffer {
-    type Error = BufferError;
-}
-impl embedded_io::Write for CircularBuffer {
-    fn write(&mut self, bytes: &[u8]) -> core::result::Result<usize, Self::Error> {
+    #[inline(always)]
+    pub fn write(&mut self, bytes: &[u8]) -> Result<usize> {
         // get the length
         let bytes_len = bytes.len();
         // first see if it will fit
@@ -170,10 +137,6 @@ impl embedded_io::Write for CircularBuffer {
         }
         // return
         Ok(bytes_len)
-    }
-
-    fn flush(&mut self) -> core::result::Result<(), Self::Error> {
-        Ok(())
     }
 }
 

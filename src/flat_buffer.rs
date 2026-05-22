@@ -1,6 +1,6 @@
 use core::fmt::{self, Write};
 
-use crate::{BufferError, BufferHandle};
+use crate::BufferError;
 
 type Result<T> = core::result::Result<T, BufferError>;
 
@@ -45,6 +45,15 @@ impl FlatBuffer {
     }
 
     #[inline(always)]
+    pub fn reset(&mut self) -> usize {
+        // reset pointers to the start
+        self.read_ptr = self.start_ptr;
+        self.write_ptr = self.start_ptr;
+        // return the capacity
+        return self.capacity;
+    }
+
+    #[inline(always)]
     pub fn read_byte(&mut self) -> Option<u8> {
         // is there anything to read
         if self.read_ptr == self.write_ptr {
@@ -59,15 +68,17 @@ impl FlatBuffer {
     }
 
     #[inline(always)]
-    pub fn write_byte(&mut self, byte: u8) {
+    pub fn next_write_slot(&mut self) -> Option<&mut u8> {
         // are we full
         if self.write_ptr == self.end_ptr {
-            return;
+            return None;
         }
-        // write the byte
-        unsafe { self.write_ptr.write_volatile(byte) };
+        // get the slot
+        let slot = unsafe { &mut *self.write_ptr };
         // update the write pointer
         self.write_ptr = unsafe { self.write_ptr.add(1) };
+        // return the next slot
+        Some(slot)
     }
 
     #[inline(always)]

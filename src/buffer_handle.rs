@@ -1,9 +1,4 @@
-use core::{
-    error::Error,
-    fmt::{self, Write},
-    ops::{Deref, DerefMut},
-};
-use embedded_io::{ErrorKind, ErrorType};
+use core::{error::Error, fmt};
 
 use crate::{BufferRequest, CircularBuffer, FlatBuffer};
 
@@ -30,17 +25,6 @@ impl From<BufferError> for fmt::Error {
 }
 
 impl Error for BufferError {}
-
-impl embedded_io::Error for BufferError {
-    fn kind(&self) -> embedded_io::ErrorKind {
-        match self {
-            BufferError::BufferEmpty => ErrorKind::Other,
-            BufferError::InsufficientSpace => ErrorKind::Other,
-        }
-    }
-}
-
-type Result<T> = core::result::Result<T, BufferError>;
 
 pub struct BufferHandle {
     // pointer to the start of the buffer

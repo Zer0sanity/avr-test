@@ -1,4 +1,3 @@
-use crate::BufferHandle;
 use crate::CircularBuffer;
 use crate::FlatBuffer;
 use crate::driver::*;
@@ -429,7 +428,6 @@ pub struct UsbDriver;
 
 pub struct UsbRxFuture {
     buffer: Option<FlatBuffer>,
-    last_length: u8,
 }
 
 impl Future for UsbRxFuture {
@@ -453,16 +451,21 @@ impl Future for UsbRxFuture {
             };
             // while there are bytes to read and we haven't read a packer
             let mut packet_detected = false;
+            // do somthing with this.  how do we want to handle overflow of receive buffer
+            // let mut _over_flow = false;
             // loop while there are bytes to get or a packet was detected
             while let Some(byte) = rx_state.buffer.read_byte() {
-                // write the byte
-                rx_buffer.write_byte(byte);
-                // if a packet was read
-                if byte == 0x0d {
-                    // set the packet found flag
+                // process the byte
+                if let Some(slot) = rx_buffer.next_write_slot() {
+                    unsafe { (slot as *mut u8).write_volatile(byte) };
                     packet_detected = true;
-                    // exit the loop
-                    break;
+                    // if a packet was read
+                    if byte == 0x0d {
+                        // set the packet found flag
+                        packet_detected = true;
+                        // exit the loop
+                        break;
+                    }
                 }
             }
             // ensure interrupts are enabled
@@ -538,7 +541,6 @@ impl Driver for UsbDriver {
         // submits a buffer for the async rx future to receive bytes into
         UsbRxFuture {
             buffer: Some(buffer),
-            last_length: 0,
         }
     }
 
@@ -627,11 +629,16 @@ fn INT6() {
     // if the buffer is full, leave byte in usb hardware buffer and disable Rx interrupts.
     // when the reader re-enable interrupts after reading bytes, the data will be waiting.
     // TODO there is a optimization here to read more then one byte at a time.
-    if rx_state.buffer.free_space() != 0 {
+    // if rx_state.buffer.free_space() != 0 {
+    //     // read byte off usb hardware
+    //     let byte = UsbFT240::read_byte();
+    //     // write it to the state buffer
+    //     rx_state.buffer.write_byte(byte);
+    // } else {
+    if let Some(slot) = rx_state.buffer.next_write_slot() {
         // read byte off usb hardware
         let byte = UsbFT240::read_byte();
-        // write it to the state buffer
-        rx_state.buffer.write_byte(byte);
+        unsafe { (slot as *mut u8).write_volatile(byte) };
     } else {
         // set an error
         rx_state.error = Some(DriverError::InsufficientSpace);

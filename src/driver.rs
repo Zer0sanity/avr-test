@@ -1,4 +1,4 @@
-use crate::{BufferHandle, CircularBuffer, FlatBuffer};
+use crate::{CircularBuffer, FlatBuffer};
 use core::{fmt, task::Waker};
 
 pub struct TxState {
