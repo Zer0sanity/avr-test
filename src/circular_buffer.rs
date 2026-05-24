@@ -54,6 +54,12 @@ impl CircularBuffer {
     }
 
     #[inline(always)]
+    pub fn is_full(&self) -> bool {
+        // if free space is zero
+        self.free_space() == 0
+    }
+
+    #[inline(always)]
     pub fn reset(&mut self) -> usize {
         // reset pointers to the start
         self.read_ptr = self.start_ptr;
@@ -63,10 +69,10 @@ impl CircularBuffer {
     }
 
     #[inline(always)]
-    pub fn read_byte(&mut self) -> Option<u8> {
+    pub fn read_byte(&mut self) -> Result<u8> {
         // is there anything to read
         if self.read_ptr == self.write_ptr {
-            return None;
+            return Err(BufferError::BufferEmpty);
         }
         // read a byte
         let byte = unsafe { self.read_ptr.read_volatile() };
@@ -77,11 +83,11 @@ impl CircularBuffer {
             self.read_ptr = self.start_ptr;
         }
         // return the next byte
-        Some(byte)
+        Ok(byte)
     }
 
     #[inline(always)]
-    pub fn next_write_slot(&mut self) -> Option<&mut u8> {
+    pub fn write_byte(&mut self, byte: u8) -> Result<()> {
         // get the next write position
         let mut next_write_ptr = unsafe { self.write_ptr.add(1) };
         // check for wrapping
@@ -90,14 +96,14 @@ impl CircularBuffer {
         }
         // if the next write position equals the read position we are full
         if next_write_ptr == self.read_ptr {
-            return None;
+            return Err(BufferError::InsufficientSpace);
         }
-        // get the slot
-        let slot = unsafe { Some(&mut *self.write_ptr) };
+        // write the byte
+        unsafe { self.write_ptr.write_volatile(byte) };
         // update the write pointer
         self.write_ptr = next_write_ptr;
-        // return the slot
-        slot
+        // everything is fine
+        Ok(())
     }
 
     #[inline(always)]

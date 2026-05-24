@@ -59,8 +59,6 @@ fn main() -> ! {
 pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
     let mut counter: u16 = 0;
 
-    led.off();
-
     // request a buffer for usb driver
     let handle = BufferRequest.await;
     let rx_buffer = handle.into();
@@ -74,35 +72,37 @@ pub async fn error_blink_task(mut led: LED, mut usb: UsbDriver) {
     let _ = usb.write(buffer).await;
 
     loop {
-        // request a buffer for receiving a packet
-        let handle = BufferRequest.await;
+        // turn the led off
+        led.off();
 
-        let rx_buffer: FlatBuffer = handle.into();
-        led.on();
+        // increment the counter
+        counter += 1;
+
+        // request a buffer for receiving a packet
+        let rx_buffer: FlatBuffer = (BufferRequest.await).into();
         let rx_result = usb.read(rx_buffer).await;
 
         let tx_buffer = match rx_result {
             Ok(mut buf) => {
-                counter += 1;
-                let handle = BufferRequest.await;
+                let received_len = buf.len();
+                let mut buffer: FlatBuffer = (BufferRequest.await).into();
 
-                let mut buffer: FlatBuffer = handle.into();
-                // buffer.reset();
+                // copy in the received packet
+                while let Ok(byte) = buf.read_byte() {
+                    if byte == 0x0d {
+                        break;
+                    }
 
-                // while let Some(byte) = buf.read_byte() {
-                //     if let Some(slot) = buffer.next_write_slot() {
-                //         if byte == 0x0d {
-                //             break;
-                //         }
-                //         *slot = byte;
-                //     }
-                // }
+                    if !buffer.is_full() {
+                        buffer.write_byte(byte);
+                    }
+                }
 
-                // buffer.write(&buf.as_slice()[..buf.len() - 1]);
-                // _ = write!(buffer, "{}", buf.as_slice());
-                _ = write!(buffer, " count: {}\r\n", buf.len());
-                _ = write!(buffer, "count: {}\r\n", buf.len());
-
+                _ = write!(
+                    buffer,
+                    " receive length: {}, counter: {}\r\n",
+                    received_len, counter
+                );
                 buffer
             }
             Err(err) => {

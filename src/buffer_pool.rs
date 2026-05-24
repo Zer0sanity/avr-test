@@ -171,8 +171,7 @@ impl BufferRequest {
     pub fn free_buffers() -> u8 {
         avr_device::interrupt::free(|cs| {
             // get the pool
-            let mut buffer_pool = BUFFER_POOL.borrow(cs).borrow_mut();
-            buffer_pool.allocator.count
+            BUFFER_POOL.borrow(cs).borrow_mut().allocator.count
         })
     }
 }

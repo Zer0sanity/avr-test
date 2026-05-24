@@ -1,3 +1,4 @@
+use crate::BufferError;
 use crate::CircularBuffer;
 use crate::FlatBuffer;
 use crate::driver::*;
@@ -451,14 +452,14 @@ impl Future for UsbRxFuture {
             };
             // while there are bytes to read and we haven't read a packer
             let mut packet_detected = false;
-            // do somthing with this.  how do we want to handle overflow of receive buffer
-            // let mut _over_flow = false;
+            // do something with this.  how do we want to handle overflow of receive buffer
+            let mut over_flow = false;
             // loop while there are bytes to get or a packet was detected
-            while let Some(byte) = rx_state.buffer.read_byte() {
-                // process the byte
-                if let Some(slot) = rx_buffer.next_write_slot() {
-                    unsafe { (slot as *mut u8).write_volatile(byte) };
-                    packet_detected = true;
+            while let Ok(byte) = rx_state.buffer.read_byte() {
+                // if the buffer isn't full
+                if !rx_buffer.is_full() {
+                    // write the byte
+                    rx_buffer.write_byte(byte);
                     // if a packet was read
                     if byte == 0x0d {
                         // set the packet found flag
@@ -466,6 +467,9 @@ impl Future for UsbRxFuture {
                         // exit the loop
                         break;
                     }
+                } else {
+                    over_flow = true;
+                    break;
                 }
             }
             // ensure interrupts are enabled
@@ -473,6 +477,8 @@ impl Future for UsbRxFuture {
             // finish up
             if packet_detected {
                 Poll::Ready(Ok(self.buffer.take().unwrap()))
+            } else if over_flow {
+                Poll::Ready(Err(DriverError::InsufficientSpace))
             } else {
                 // register the waker
                 rx_state.waker = Some(cx.waker().clone());
@@ -548,24 +554,23 @@ impl Driver for UsbDriver {
         // go interrupt free while updating state
         avr_device::interrupt::free(|cs| {
             // grab the first byte
-            match buffer.read_byte() {
-                // if its some
-                Some(byte) => {
-                    // set the state
-                    *TX_STATE.borrow(cs).borrow_mut() = Some(TxState::new(buffer));
-                    // enable the transmit interrupts
-                    UsbFT240::tx_int_enable();
-                    // kick off the first one
-                    UsbFT240::write_byte(byte);
+            if let Ok(byte) = buffer.read_byte() {
+                // i saw one case where it said it received 6 bytes, but console only showed 4
+                if UsbFT240::txe_is_high() {
+                    buffer.write_byte(b'*');
                 }
-                // no byte found
-                None => {
-                    // set the state to an error so the future will complete
-                    *TX_STATE.borrow(cs).borrow_mut() =
-                        Some(TxState::error(buffer, DriverError::BufferEmpty));
-                    // disable transmit interrupts
-                    UsbFT240::tx_int_disable()
-                }
+                // set the state
+                *TX_STATE.borrow(cs).borrow_mut() = Some(TxState::new(buffer));
+                // enable the transmit interrupts
+                UsbFT240::tx_int_enable();
+                // kick off the first one
+                UsbFT240::write_byte(byte);
+            } else {
+                // set the state to an error so the future will complete
+                *TX_STATE.borrow(cs).borrow_mut() =
+                    Some(TxState::error(buffer, DriverError::BufferEmpty));
+                // disable transmit interrupts
+                UsbFT240::tx_int_disable();
             }
             // return a future
             UsbTxFuture
@@ -591,21 +596,20 @@ fn INT5() {
         }
     };
     // grab the next byte
-    match tx_state.buffer.read_byte() {
+    if let Ok(byte) = tx_state.buffer.read_byte() {
         // write it
-        Some(byte) => UsbFT240::write_byte(byte),
-        // all done
-        None => {
-            // flush the data to the host
-            UsbFT240::flush();
-            // disable transmit interrupts
-            UsbFT240::tx_int_disable();
-            // update the state that we are done
-            tx_state.result = Some(Ok(()));
-            // kick the waker if its set
-            if let Some(waker) = tx_state.waker.take() {
-                waker.wake();
-            }
+        UsbFT240::write_byte(byte);
+    } else {
+        // all done (for now all we have is BufferError::BufferEmpty)
+        // flush the data to the host
+        UsbFT240::flush();
+        // disable transmit interrupts
+        UsbFT240::tx_int_disable();
+        // update the state that we are done
+        tx_state.result = Some(Ok(()));
+        // kick the waker if its set
+        if let Some(waker) = tx_state.waker.take() {
+            waker.wake();
         }
     }
 }
@@ -629,16 +633,11 @@ fn INT6() {
     // if the buffer is full, leave byte in usb hardware buffer and disable Rx interrupts.
     // when the reader re-enable interrupts after reading bytes, the data will be waiting.
     // TODO there is a optimization here to read more then one byte at a time.
-    // if rx_state.buffer.free_space() != 0 {
-    //     // read byte off usb hardware
-    //     let byte = UsbFT240::read_byte();
-    //     // write it to the state buffer
-    //     rx_state.buffer.write_byte(byte);
-    // } else {
-    if let Some(slot) = rx_state.buffer.next_write_slot() {
+    if !rx_state.buffer.is_full() {
         // read byte off usb hardware
         let byte = UsbFT240::read_byte();
-        unsafe { (slot as *mut u8).write_volatile(byte) };
+        // write it to the state buffer (we already verified it will fit so ignore the Result)
+        let _ = rx_state.buffer.write_byte(byte);
     } else {
         // set an error
         rx_state.error = Some(DriverError::InsufficientSpace);

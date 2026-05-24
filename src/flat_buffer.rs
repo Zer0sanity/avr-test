@@ -45,6 +45,12 @@ impl FlatBuffer {
     }
 
     #[inline(always)]
+    pub fn is_full(&self) -> bool {
+        // if free space is zero
+        self.free_space() == 0
+    }
+
+    #[inline(always)]
     pub fn reset(&mut self) -> usize {
         // reset pointers to the start
         self.read_ptr = self.start_ptr;
@@ -54,31 +60,33 @@ impl FlatBuffer {
     }
 
     #[inline(always)]
-    pub fn read_byte(&mut self) -> Option<u8> {
+    pub fn read_byte(&mut self) -> Result<u8> {
         // is there anything to read
         if self.read_ptr == self.write_ptr {
-            return None;
+            return Err(BufferError::BufferEmpty);
         }
         // read a byte
         let byte = unsafe { self.read_ptr.read_volatile() };
         // update the read pointer
         self.read_ptr = unsafe { self.read_ptr.add(1) };
         // return the next byte
-        Some(byte)
+        Ok(byte)
     }
 
     #[inline(always)]
-    pub fn next_write_slot(&mut self) -> Option<&mut u8> {
+    pub fn write_byte(&mut self, byte: u8) -> Result<()> {
         // are we full
         if self.write_ptr == self.end_ptr {
-            return None;
+            return Err(BufferError::InsufficientSpace);
         }
-        // get the slot
-        let slot = unsafe { &mut *self.write_ptr };
-        // update the write pointer
-        self.write_ptr = unsafe { self.write_ptr.add(1) };
+        unsafe {
+            // write the byte
+            self.write_ptr.write_volatile(byte);
+            // update the write pointer
+            self.write_ptr = self.write_ptr.add(1)
+        };
         // return the next slot
-        Some(slot)
+        Ok(())
     }
 
     #[inline(always)]
