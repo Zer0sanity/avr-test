@@ -7,12 +7,14 @@ use core::{fmt::Write, panic::PanicInfo};
 use avr_device::at90can128;
 use hal::Pins;
 pub mod async_queue;
+mod at90can128_hal;
 pub mod buffer_handle;
 pub mod buffer_pool;
 pub mod circular_buffer;
 pub mod driver;
 pub mod executor;
 pub mod flat_buffer;
+mod ft240x;
 pub mod hal;
 pub mod led;
 pub mod timer;
@@ -30,15 +32,36 @@ pub use timer::*;
 pub use usb_ft240::*;
 pub use wait_pin_state::*;
 
+use crate::{at90can128_hal::avr_port::AvrPort2, ft240x::Ft240x};
+
 #[avr_device::entry]
 fn main() -> ! {
     let dp = at90can128::Peripherals::take().unwrap();
 
-    let pins = Pins::new(dp.PORTB, dp.PORTC, dp.PORTE, dp.PORTG);
+    // let pins = Pins::new(dp.PORTB, dp.PORTC, dp.PORTE, dp.PORTG);
+    let pins = Pins::new(dp.PORTB, dp.PORTE, dp.PORTG);
     let err_led = LED::new(pins.pb6.into_output().downgrade(), true);
     let can_led = LED::new(pins.pb7.into_output().downgrade(), true);
 
     let usb = UsbFT240::init();
+
+    let io_bus = AvrPort2 { port: dp.PORTC };
+    let sense = pins.pg2.into_floating_input().downgrade().forget_imode();
+    let rxf = pins.pe6.into_floating_input().downgrade().forget_imode();
+    let txe = pins.pe5.into_floating_input().downgrade().forget_imode();
+    let rd = pins.pe4.into_output().downgrade();
+    let wr = pins.pe7.into_output().downgrade();
+    let siwu = pins.pe2.into_output().downgrade();
+
+    let mut ft240 = Ft240x::new(io_bus, sense, rxf, txe, rd, wr, siwu);
+
+    if ft240.connected() {
+        let _ = ft240.can_read();
+        let _ = ft240.can_write();
+        ft240.write_byte(0x00);
+        let _ = ft240.read_byte();
+        ft240.flush();
+    }
 
     Timer::init(&dp.TC1);
 

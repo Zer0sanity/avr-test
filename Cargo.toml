@@ -8,7 +8,11 @@ avr-device = { version = "0.8.1", features = ["at90can128", "rt"] }
 avr-hal-generic = { git = "https://github.com/rahix/avr-hal", subcrate = "avr-hal-generic" }
 panic-halt = "1.0.0"
 portable-atomic = { version = "1.0", features = ["critical-section"] }
-		
+embedded-hal = "1.0.0"
+embedded-hal-async = "1.0.0"
+
+
+
 [profile.release]
 panic = "abort"
 lto = true
