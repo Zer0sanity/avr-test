@@ -2,7 +2,7 @@ pub mod io_bus_8;
 
 use core::{cell::RefCell, task::{Context, Poll, Waker}};
 
-use avr_device::{at90can128, interrupt::Mutex};
+use avr_device::{interrupt::Mutex};
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_io::{ErrorKind, ErrorType};
 use embedded_io_async::{Read, Write};
@@ -120,14 +120,12 @@ where
     }
 
     // returns a future to poll for when its clear to send data to the ft240x
-    pub fn cts<'a>(&mut self) -> CtsFuture<'a, BUS, SENSE, RXF, TXE, RD, WR, SIWU> {
+    pub fn cts(&mut self) -> CtsFuture<'_, BUS, SENSE, RXF, TXE, RD, WR, SIWU> {
         CtsFuture { ftdi: self }
     }
 }
 
 impl<BUS, SENSE, RXF, TXE, RD, WR, SIWU> ErrorType for Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU>
-where
-    BUS: IoBus8,
 {
     type Error = embedded_io::ErrorKind;
 }
