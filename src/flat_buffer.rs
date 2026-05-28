@@ -120,3 +120,9 @@ impl AsRef<[u8]> for FlatBuffer {
         unsafe { core::slice::from_raw_parts(self.read_ptr, self.len()) }
     }
 }
+
+impl AsMut<[u8]> for FlatBuffer {
+    fn as_mut(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.write_ptr, self.free_space()) }
+    }
+}

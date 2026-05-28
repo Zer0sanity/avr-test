@@ -68,6 +68,10 @@ impl At90Can128Interrupts {
     pub fn rxf_int_enable() {
         // initialize receive interrupts
         let ext_int = unsafe { &*Self::EXT_INT_PTR };
+        // clear the interrupt flag
+        ext_int
+            .eifr()
+            .write(|w| unsafe { w.intf().bits(Self::RX_EXT_INT6) });
         // enable interrupts
         ext_int
             .eimsk()
@@ -94,6 +98,10 @@ impl At90Can128Interrupts {
     pub fn txe_int_enable() {
         // initialize external interrupts
         let ext_int = unsafe { &*Self::EXT_INT_PTR };
+        // clear the INT5 interrupt flags by writing it to 1
+        ext_int
+            .eifr()
+            .write(|w| unsafe { w.intf().bits(Self::TX_EXT_INT5) });
         // enable interrupts so we get interrupted when the FT240 can accept the next byte
         ext_int
             .eimsk()

@@ -216,9 +216,11 @@ where
  {
     type Output = Result<(), embedded_io::ErrorKind>;
     fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // go interrupt free while we check.  if we have already registered the waker and the interrupt
-        // fires between checking pins and registering the waker.  the interrupt will wake the waker, but
-        // not this one, and we may never get woken up again
+        /*
+        go interrupt free while we check.  if we have already registered the waker and the interrupt
+        fires between checking pins and registering the waker.  the interrupt will wake the waker, but
+        not this one, and we may never get woken up again
+        */
         avr_device::interrupt::free(|cs| {
             // see if we are connected
             if !self.ftdi.is_connected() {

@@ -6,7 +6,7 @@ use core::{fmt::Write as fmtWrite, panic::PanicInfo};
 
 use avr_device::at90can128;
 use embedded_hal::digital::{InputPin, OutputPin};
-use embedded_io_async::Write;
+use embedded_io_async::{Read, Write};
 use hal::Pins;
 pub mod async_queue;
 mod at90can128_hal;
@@ -112,7 +112,17 @@ pub async fn error_blink_task<BUS, SENSE, RXF, TXE, RD, WR, SIWU>(
         led.off();
 
         counter += 1;
+
         let mut buffer: FlatBuffer = BufferRequest.await.into();
+
+        let rbuf = buffer.as_mut();
+
+        if usb.can_read() {
+            led.on();
+
+            _ = usb.read(rbuf).await;
+        }
+
         _ = write!(
             buffer,
             "Hello, World 123451234512345123451234512345. count: {}, tx_pending: {}, rx_pending: {}\r\n",
