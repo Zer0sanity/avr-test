@@ -105,15 +105,25 @@ pub async fn error_blink_task<BUS, SENSE, RXF, TXE, RD, WR, SIWU>(
     // submit it to the driver
     // usb.init(rx_buffer);
 
-    let handle = BufferRequest.await;
-    let mut buffer: [u8; 20];
-
-    let hi = "Hello, World 123{}\r\n";
-    let _ = usb.write(&hi.as_bytes()).await;
+    // let mut buffer: [u8; 40];
 
     loop {
         // // turn the led off
-        // led.off();
+        led.off();
+
+        counter += 1;
+        let mut buffer: FlatBuffer = BufferRequest.await.into();
+        _ = write!(
+            buffer,
+            "Hello, World 123451234512345123451234512345. count: {}, tx_pending: {}, rx_pending: {}\r\n",
+            counter,
+            usb.tx_pending(),
+            usb.rx_pending()
+        );
+
+        if let Err(e) = usb.write_all(buffer.as_ref()).await {
+            led.on();
+        }
 
         // // increment the counter
         // counter += 1;
@@ -154,8 +164,6 @@ pub async fn error_blink_task<BUS, SENSE, RXF, TXE, RD, WR, SIWU>(
         //         buffer
         //     }
         // };
-        // // Timer::delay(50).await;
-        // led.on();
         // let _ = usb.write(tx_buffer).await;
     }
 }

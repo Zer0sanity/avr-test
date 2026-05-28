@@ -9,6 +9,11 @@ use embedded_io_async::{Read, Write};
 
 use crate::{ft240x::io_bus_8::IoBus8, interrupts::At90Can128Interrupts};
 
+// global waker for transmitting and receiving
+pub static TX_WAKER: Mutex<RefCell<Option<Waker>>> = Mutex::new(RefCell::new(None));
+pub static RX_WAKER: Mutex<RefCell<Option<Waker>>> = Mutex::new(RefCell::new(None));
+
+
 pub struct Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU> {
     bus: BUS,     // port used write/read from FT240
     sense: SENSE, // input to tell if USB is connected
@@ -17,6 +22,8 @@ pub struct Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU> {
     rd: RD,       // output to have the FT240 put a received byte from its FIFO to the data bus
     wr: WR,       // output to have the FT240 read data byte from data bus to its transmit FIFO
     siwu: SIWU,   // output to tell the FT240 to flush its transmit FIFO buffer to the PC
+    tx_pending: usize,
+    rx_pending: usize,
 }
 
 impl<BUS, SENSE, RXF, TXE, RD, WR, SIWU> Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU>
@@ -44,7 +51,7 @@ where
         At90Can128Interrupts::txe_int_setup();
         
         // initialize the structure
-        Self {bus, sense, rxf, txe, rd, wr, siwu }
+        Self {bus, sense, rxf, txe, rd, wr, siwu, tx_pending: 0, rx_pending: 0}
     }
 
     #[inline(always)]
@@ -123,16 +130,34 @@ where
     pub fn cts(&mut self) -> CtsFuture<'_, BUS, SENSE, RXF, TXE, RD, WR, SIWU> {
         CtsFuture { ftdi: self }
     }
+
+    // returns a future to poll for when its ok to read data from the ft240x
+    pub fn rts(&mut self) -> RtsFuture<'_, BUS, SENSE, RXF, TXE, RD, WR, SIWU> {
+        RtsFuture { ftdi: self }
+    }
+
+    pub fn inc_tx_pending(&mut self)
+    {
+        self.tx_pending += 1;
+    }
+
+    pub fn tx_pending(&self) -> usize {
+        self.tx_pending
+    }
+
+    pub fn inc_rx_pending(&mut self)
+    {
+        self.rx_pending += 1;
+    }
+    
+    pub fn rx_pending(&self) -> usize {
+        self.rx_pending
+    }
+
+    
 }
 
-impl<BUS, SENSE, RXF, TXE, RD, WR, SIWU> ErrorType for Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU>
-{
-    type Error = embedded_io::ErrorKind;
-}
-
-// global waker for transmitting
-pub static TX_WAKER: Mutex<RefCell<Option<Waker>>> = Mutex::new(RefCell::new(None));
-// clear to send to ft240x future
+// clear to send data to ft240x
 pub struct CtsFuture<'a, BUS, SENSE, RXF, TXE, RD, WR, SIWU> {
     pub ftdi: &'a mut Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU>,
 }
@@ -161,8 +186,11 @@ where
             if self.ftdi.can_write() {
                 return Poll::Ready(Ok(()));
             }
+
+            self.ftdi.inc_tx_pending();
+            
             // else we cant send.  register the waker
-            *RX_WAKER.borrow(cs).borrow_mut() = Some(cx.waker().clone());
+            *TX_WAKER.borrow(cs).borrow_mut() = Some(cx.waker().clone());
             // enable interrupts
             At90Can128Interrupts::txe_int_enable();
             // poll pending
@@ -170,6 +198,55 @@ where
         })
     }
 }
+
+// request to send from ft240x
+pub struct RtsFuture<'a, BUS, SENSE, RXF, TXE, RD, WR, SIWU> {
+    pub ftdi: &'a mut Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU>,
+}
+
+impl<'a, BUS, SENSE, RXF, TXE, RD, WR, SIWU> Future for RtsFuture<'a, BUS, SENSE, RXF, TXE, RD, WR, SIWU>
+where
+    BUS: IoBus8,
+    SENSE: InputPin<Error = core::convert::Infallible>,
+    RXF: InputPin<Error = core::convert::Infallible>,
+    TXE: InputPin<Error = core::convert::Infallible>,
+    RD: OutputPin<Error = core::convert::Infallible>,
+    WR: OutputPin<Error = core::convert::Infallible>,
+    SIWU: OutputPin<Error = core::convert::Infallible>,
+ {
+    type Output = Result<(), embedded_io::ErrorKind>;
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // go interrupt free while we check.  if we have already registered the waker and the interrupt
+        // fires between checking pins and registering the waker.  the interrupt will wake the waker, but
+        // not this one, and we may never get woken up again
+        avr_device::interrupt::free(|cs| {
+            // see if we are connected
+            if !self.ftdi.is_connected() {
+                return Poll::Ready(Err(ErrorKind::NotConnected));
+            }
+            // now see if there is data to read
+            if self.ftdi.can_read() {
+                return Poll::Ready(Ok(()));
+            }
+
+            self.ftdi.inc_rx_pending();
+            
+            // else no data to read.  register the waker
+            *RX_WAKER.borrow(cs).borrow_mut() = Some(cx.waker().clone());
+            // enable interrupts
+            At90Can128Interrupts::rxf_int_enable();
+            // poll pending
+            return Poll::Pending;
+        })
+    }
+}
+
+
+impl<BUS, SENSE, RXF, TXE, RD, WR, SIWU> ErrorType for Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU>
+{
+    type Error = embedded_io::ErrorKind;
+}
+
 
 impl<BUS, SENSE, RXF, TXE, RD, WR, SIWU> Write for Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU>
 where
@@ -182,21 +259,22 @@ where
     SIWU: embedded_hal::digital::OutputPin<Error = core::convert::Infallible>,
 {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        // did we get called with no data
+        // did we get called with an empty buffer
         if buf.len() == 0 {
             return Err(ErrorKind::InvalidInput);
         }
-        // wait until we can write
+        // wait until the ft240 can accept data
         if let Err(kind) = self.cts().await {
             return Err(kind);
         }
-        let mut num_bytes_written = 0;
+        // initialize the number of bytes written
+        let mut bytes = 0;
         // walk the buffer
-        for &byte in buf.iter() {
-            // we know we can send at least one, from the cts await above
-            let _ = self.write_byte(byte);
+        for byte in buf.iter() {
+            // we know we can write at least one, from the cts await above
+            let _ = self.write_byte(*byte);
             // increment the number of bytes written
-            num_bytes_written += 1;
+            bytes += 1;
             // make sure were connected
             if !self.is_connected() {
                 break;
@@ -206,8 +284,8 @@ where
                 break;
             }
         }
-        // here we sent at least one so just return the number of bytes written
-        Ok(num_bytes_written)
+        // here we sent at least one, so return the number of bytes written
+        Ok(bytes)
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
@@ -215,8 +293,6 @@ where
         Ok(())
     }
 }
-
-pub static RX_WAKER: Mutex<RefCell<Option<Waker>>> = Mutex::new(RefCell::new(None));
 
 impl<BUS, SENSE, RXF, TXE, RD, WR, SIWU> Read for Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU>
 where
@@ -229,6 +305,32 @@ where
     SIWU: embedded_hal::digital::OutputPin<Error = core::convert::Infallible>,
 {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        todo!()
+        // did we get called with a full buffer
+        if buf.len() == 0 {
+            return Err(ErrorKind::InvalidInput);
+        }
+        // wait until we can read
+        if let Err(kind) = self.rts().await {
+            return Err(kind);
+        }
+        // initialize the number of bytes read
+        let mut bytes = 0;
+        // walk the buffer
+        for byte in buf.iter_mut() {
+            // we know we can read at least one, from the rts await above
+            *byte = self.read_byte();
+            // increment the number of bytes read
+            bytes += 1;
+            // make sure were connected
+            if !self.is_connected() {
+                break;
+            }
+            // make sure the ft240x has something to read
+            if !self.can_read() {
+                break;
+            }
+        }
+        // here we read at least one so, return the number of bytes read
+        Ok(bytes)
     }
 }

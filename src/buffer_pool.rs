@@ -12,7 +12,7 @@ use avr_device::interrupt::Mutex;
 use crate::BufferHandle;
 
 const NUM_BUFFERS: usize = 8;
-const BUFFER_SIZE: usize = 64;
+const BUFFER_SIZE: usize = 128;
 
 #[derive(Debug)]
 pub enum BufferPoolError {

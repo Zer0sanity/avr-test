@@ -114,3 +114,9 @@ impl Write for FlatBuffer {
         Ok(())
     }
 }
+
+impl AsRef<[u8]> for FlatBuffer {
+    fn as_ref(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.read_ptr, self.len()) }
+    }
+}
