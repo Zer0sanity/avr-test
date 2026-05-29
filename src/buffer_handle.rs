@@ -57,8 +57,8 @@ impl From<BufferHandle> for FlatBuffer {
     }
 }
 
-// impl Drop for BufferHandle {
-//     fn drop(&mut self) {
-//         _ = BufferRequest::release_buffer(self.pool_idx);
-//     }
-// }
+impl Drop for BufferHandle {
+    fn drop(&mut self) {
+        _ = BufferRequest::release_buffer(self.pool_idx);
+    }
+}
