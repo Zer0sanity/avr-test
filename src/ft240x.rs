@@ -15,7 +15,7 @@ pub static RX_WAKER: Mutex<RefCell<Option<Waker>>> = Mutex::new(RefCell::new(Non
 
 // base struct for ft240x 
 pub struct Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU> {
-    bus: BUS,     // port used write/read from FT240
+    bus: RefCell<BUS>,     // port used write/read from FT240
     sense: SENSE, // input to tell if USB is connected
     rxf: RXF,     // input to tell when data can be read from the FT240.
     txe: TXE,     // input to tell when the FT240 can accept data.
@@ -25,17 +25,17 @@ pub struct Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU> {
 }
 
 // reader for ft240x
-pub struct Ft240xReader<BUS, SENSE, RXF, RD> {
-    bus_ptr: *mut BUS,
-    sense: SENSE,
+pub struct Ft240xReader<'a, BUS, SENSE, RXF, RD> {
+    bus: &'a RefCell<BUS>,
+    sense: &'a SENSE,
     rxf: RXF,
     rd: RD,
 }
 
 // writer for ft240x 
-pub struct Ft240xWriter<BUS, SENSE, TXE, WR, SIWU> {
-    bus: BUS,
-    sense: SENSE,
+pub struct Ft240xWriter<'a, BUS, SENSE, TXE, WR, SIWU> {
+    bus: &'a RefCell<BUS>,
+    sense: &'a SENSE,
     txe: TXE,
     wr: WR,
     siwu: SIWU,
@@ -66,25 +66,26 @@ where
         At90Can128Interrupts::txe_int_setup();
         
         // initialize the structure
-        Self {bus, sense, rxf, txe, rd, wr, siwu}
+        Self {bus: RefCell::new(bus), sense, rxf, txe, rd, wr, siwu}
     }
 
     // consume self and split up ports
-    pub fn split(self) -> (
-        Ft240xReader<BUS, SENSE, RXF, RD>, 
-        Ft240xWriter<BUS, SENSE, TXE, WR, SIWU>
+    pub fn split(&mut self) -> (
+        Ft240xReader<'static, BUS, SENSE, RXF, RD>, 
+        Ft240xWriter<'static, BUS, SENSE, TXE, WR, SIWU>
     ) {
 
+        
         let reader = Ft240xReader {
-            bus_ptr: &self.bus as *const BUS as *mut BUS ,
-            sense: unsafe { core::ptr::read(&self.sense) },
+            bus: &self.bus,
+            sense: &self.sense,
             rxf: self.rxf, 
             rd: self.rd,
         };
 
         let writer = Ft240xWriter {
-            bus: self.bus,
-            sense: self.sense,
+            bus: &mut self.bus,
+            sense: &self.sense,
             txe: self.txe,
             wr: self.wr,
             siwu: self.siwu,
@@ -95,7 +96,7 @@ where
 }
 
 
-impl<BUS, SENSE, RXF, RD> Ft240xReader<BUS, SENSE, RXF, RD>
+impl<'a, BUS, SENSE, RXF, RD> Ft240xReader<'a, BUS, SENSE, RXF, RD>
 where
     BUS: IoBus8,
     SENSE: InputPin<Error = core::convert::Infallible>,
@@ -119,35 +120,37 @@ where
     // TODO: HOT make this one inline assembly block
     #[inline(always)]
     pub fn read_byte(&mut self) -> u8 {
+        // get the bus
+        let mut bus = self.bus.borrow_mut();
         // after every RX or TX operation we reconfigure the data bus as inputs pulled up.  therefore the ports DDR should already
         // be set properly.  all that is needed is to disable the pull-ups to allow the FT240 to drive them
-        let _ = unsafe { (*self.bus_ptr ).write(0x00)};
+        let _ = bus.write(0x00);
         // pull the RD line low so the FT240 will present a received byte from its FIFO to the data bus
         let _ = self.rd.set_low();
         // preform a nop to allow time for the data bus port to stabilize and the FT240 to present the data
         avr_device::asm::nop();
         // read the data
-        let data = unsafe{ (*self.bus_ptr).read().unwrap_or(0)};
+        let data = bus.read().unwrap_or(0);
         // release the RD line since we are done with the operation
         let _ = self.rd.set_high();
         // re-enable the pull-ups
-        let _ = unsafe {(*self.bus_ptr).write(0xff)};
+        let _ = bus.write(0xff);
         // return the data
         data
     }
 
-    pub fn data_available(&mut self) -> DataAvailableFuture<'_, BUS, SENSE, RXF, RD>
+    pub fn data_available(&mut self) -> DataAvailableFuture<'_, '_, BUS, SENSE, RXF, RD>
 {
     DataAvailableFuture{reader: self}
 }
 }
 
 
-pub struct DataAvailableFuture<'a, BUS, SENSE, RXF, RD> {
-    pub reader: &'a mut Ft240xReader<BUS, SENSE, RXF, RD>,
+pub struct DataAvailableFuture<'a, 'b, BUS, SENSE, RXF, RD> {
+    pub reader: &'a mut Ft240xReader<'b, BUS, SENSE, RXF, RD>,
 }
 
-impl<'a, BUS, SENSE, RXF, RD> Future for DataAvailableFuture<'a, BUS, SENSE, RXF, RD>
+impl<'a, 'b, BUS, SENSE, RXF, RD> Future for DataAvailableFuture<'a, 'b, BUS, SENSE, RXF, RD>
 where
     BUS: IoBus8,
     SENSE: InputPin<Error = core::convert::Infallible>,
@@ -180,12 +183,12 @@ where
     }
 }
 
-impl<BUS, SENSE, RXF, RD> ErrorType for Ft240xReader<BUS, SENSE, RXF, RD>
+impl<'a, BUS, SENSE, RXF, RD> ErrorType for Ft240xReader<'a, BUS, SENSE, RXF, RD>
 {
     type Error = embedded_io::ErrorKind;
 }
 
-impl<BUS, SENSE, RXF, RD> Read for Ft240xReader<BUS, SENSE, RXF, RD>
+impl<'a, BUS, SENSE, RXF, RD> Read for Ft240xReader<'a, BUS, SENSE, RXF, RD>
 where
     BUS: IoBus8,
     SENSE: InputPin<Error = core::convert::Infallible>,
@@ -224,7 +227,7 @@ where
 }
 
 
-impl<BUS, SENSE, TXE, WR, SIWU> Ft240xWriter<BUS, SENSE, TXE, WR, SIWU>
+impl<'a, BUS, SENSE, TXE, WR, SIWU> Ft240xWriter<'a, BUS, SENSE, TXE, WR, SIWU>
 where
     BUS: IoBus8,
     SENSE: InputPin<Error = core::convert::Infallible>,
@@ -249,11 +252,13 @@ where
     // TODO: HOT make this one inline assembly block
     #[inline(always)]
     pub fn write_byte(&mut self, data: u8) {
+        // get the bus
+        let mut bus = self.bus.borrow_mut();
         // the data bus should currently be configured as inputs with pull-ups enabled.
         // we first need to reconfigure the port as an output
-        let _ = self.bus.set_as_output();
+        let _ = bus.set_as_output();
         // put the data onto the pins
-        let _ = self.bus.write(data);
+        let _ = bus.write(data);
         // pull the WR line low so FT240 will sample the data bus and store it to its FIFO
         let _ = self.wr.set_low();
         // preform a nop to allow time for the FT240 to sample the data bus
@@ -261,9 +266,9 @@ where
         // release the WR line since we are done with the operation
         let _ = self.wr.set_high();
         // reconfigure the data bus as an input
-        let _ = self.bus.set_as_input();
+        let _ = bus.set_as_input();
         //  with pull-ups enabled
-        let _ = self.bus.write(0xff);
+        let _ = bus.write(0xff);
     }
 
     // pulses the SIWU(Send Immediate/PC Wake-up) line to flush the FT240s Tx FIFO to the host
@@ -277,18 +282,18 @@ where
         let _ = self.siwu.set_high();
     }
     
-    pub fn data_can_be_written(&mut self) -> DataCanBeWrittenFuture<'_, BUS, SENSE, TXE, WR, SIWU>
+    pub fn data_can_be_written(&mut self) -> DataCanBeWrittenFuture<'_, '_, BUS, SENSE, TXE, WR, SIWU>
 {
     DataCanBeWrittenFuture{writer: self}
 
 }
 }
 
-pub struct DataCanBeWrittenFuture<'a, BUS, SENSE, TXE, WR, SIWU> {
-    pub writer: &'a mut Ft240xWriter<BUS, SENSE, TXE, WR, SIWU>,
+pub struct DataCanBeWrittenFuture<'a, 'b, BUS, SENSE, TXE, WR, SIWU> {
+    pub writer: &'a mut Ft240xWriter<'b, BUS, SENSE, TXE, WR, SIWU>,
 }
 
-impl<'a, BUS, SENSE, TXE, WR, SIWU> Future for DataCanBeWrittenFuture<'a, BUS, SENSE, TXE, WR, SIWU>
+impl<'a, 'b, BUS, SENSE, TXE, WR, SIWU> Future for DataCanBeWrittenFuture<'a, 'b, BUS, SENSE, TXE, WR, SIWU>
 where
     BUS: IoBus8,
     SENSE: InputPin<Error = core::convert::Infallible>,
@@ -320,13 +325,13 @@ where
     }
 }
 
-impl<BUS, SENSE, TXE, WR, SIWU> ErrorType  for Ft240xWriter<BUS, SENSE, TXE, WR, SIWU>
+impl<'a, BUS, SENSE, TXE, WR, SIWU> ErrorType  for Ft240xWriter<'a, BUS, SENSE, TXE, WR, SIWU>
 {
     type Error = embedded_io::ErrorKind;
 }
 
 
-impl<BUS, SENSE, TXE, WR, SIWU> Write  for Ft240xWriter<BUS, SENSE, TXE, WR, SIWU>
+impl<'a, BUS, SENSE, TXE, WR, SIWU> Write  for Ft240xWriter<'a, BUS, SENSE, TXE, WR, SIWU>
 where
     BUS: IoBus8,
     SENSE: embedded_hal::digital::InputPin<Error = core::convert::Infallible>,

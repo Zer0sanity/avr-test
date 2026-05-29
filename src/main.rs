@@ -78,8 +78,8 @@ fn main() -> ! {
     loop {}
 }
 
-pub async fn ft240_reader_task<BUS, SENSE, RXF, RD>(
-    mut reader: Ft240xReader<BUS, SENSE, RXF, RD>,
+pub async fn ft240_reader_task<'a, BUS, SENSE, RXF, RD>(
+    mut reader: Ft240xReader<'a, BUS, SENSE, RXF, RD>,
     mut led: LED,
 ) where
     BUS: IoBus8,
@@ -107,8 +107,8 @@ pub async fn ft240_reader_task<BUS, SENSE, RXF, RD>(
     }
 }
 
-pub async fn ft240_writer_task<BUS, SENSE, TXE, WR, SIWU>(
-    mut writer: Ft240xWriter<BUS, SENSE, TXE, WR, SIWU>,
+pub async fn ft240_writer_task<'a, BUS, SENSE, TXE, WR, SIWU>(
+    mut writer: Ft240xWriter<'a, BUS, SENSE, TXE, WR, SIWU>,
     mut led: LED,
 ) where
     BUS: IoBus8,
