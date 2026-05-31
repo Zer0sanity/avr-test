@@ -5,6 +5,7 @@
 use core::{fmt::Write as fmtWrite, panic::PanicInfo};
 
 use avr_device::at90can128;
+use avr_hal_generic::port::mode::{AnyInput, Input};
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_io_async::{Read, Write};
 use hal::Pins;
@@ -36,9 +37,12 @@ pub use timer::*;
 pub use wait_pin_state::*;
 
 use crate::{
-    at90can128_hal::avr_port::AvrPort2,
+    at90can128_hal::avr_port::{BusHandle, StaticBus},
     ft240x::{Ft240x, Ft240xReader, Ft240xWriter, io_bus_8::IoBus8},
+    hal::{Dynamic, Pin},
 };
+
+static USB_BUS: StaticBus<at90can128::PORTC, Pin<Input<AnyInput>, Dynamic>> = StaticBus::empty();
 
 #[avr_device::entry]
 fn main() -> ! {
@@ -49,10 +53,12 @@ fn main() -> ! {
     let err_led = LED::new(pins.pb6.into_output().downgrade(), true);
     let can_led = LED::new(pins.pb7.into_output().downgrade(), true);
 
-    // let usb = UsbFT240::init();
+    let io_bus = BusHandle::init(
+        dp.PORTC,
+        pins.pg2.into_floating_input().downgrade().forget_imode(),
+        &USB_BUS,
+    );
 
-    let io_bus = AvrPort2 { port: dp.PORTC };
-    let sense = pins.pg2.into_floating_input().downgrade().forget_imode();
     let rxf = pins.pe6.into_floating_input().downgrade().forget_imode();
     let txe = pins.pe5.into_floating_input().downgrade().forget_imode();
     let rd = pins.pe4.into_output().downgrade();
@@ -60,7 +66,7 @@ fn main() -> ! {
     let siwu = pins.pe2.into_output().downgrade();
 
     // initialize usb
-    let ft240 = Ft240x::new(io_bus, sense, rxf, txe, rd, wr, siwu);
+    let ft240 = Ft240x::new(io_bus, rxf, txe, rd, wr, siwu);
     // split it
     let (reader, writer) = ft240.split();
 
@@ -71,6 +77,10 @@ fn main() -> ! {
         b: ft240_writer_task(writer, can_led),
     };
 
+    unsafe {
+        avr_device::interrupt::enable();
+    }
+
     // 3. Start the Executor
     let mut executor = Executor::new(combined_future);
     executor.run();
@@ -78,12 +88,9 @@ fn main() -> ! {
     loop {}
 }
 
-pub async fn ft240_reader_task<'a, BUS, SENSE, RXF, RD>(
-    mut reader: Ft240xReader<'a, BUS, SENSE, RXF, RD>,
-    mut led: LED,
-) where
+pub async fn ft240_reader_task<BUS, RXF, RD>(mut reader: Ft240xReader<BUS, RXF, RD>, mut led: LED)
+where
     BUS: IoBus8,
-    SENSE: InputPin<Error = core::convert::Infallible>,
     RXF: InputPin<Error = core::convert::Infallible>,
     RD: OutputPin<Error = core::convert::Infallible>,
 {
@@ -91,56 +98,53 @@ pub async fn ft240_reader_task<'a, BUS, SENSE, RXF, RD>(
 
     let mut buffer: FlatBuffer = BufferRequest.await.into();
 
-    led.off();
-
     loop {
+        // turn off the led
+        led.off();
+        // reset the read buffer
         buffer.reset();
-
+        // get the buffer as a mutable slice
         let rx_buffer = buffer.as_mut();
+        // preform a read
         let _ = reader.read(rx_buffer).await;
-
-        counter += 1;
-
-        if counter % 5 == 0 {
-            Timer::delay(50).await;
-        }
+        // blink the led on
+        led.on();
     }
 }
 
-pub async fn ft240_writer_task<'a, BUS, SENSE, TXE, WR, SIWU>(
-    mut writer: Ft240xWriter<'a, BUS, SENSE, TXE, WR, SIWU>,
+pub async fn ft240_writer_task<BUS, TXE, WR, SIWU>(
+    mut writer: Ft240xWriter<BUS, TXE, WR, SIWU>,
     mut led: LED,
 ) where
     BUS: IoBus8,
-    SENSE: InputPin<Error = core::convert::Infallible>,
     TXE: InputPin<Error = core::convert::Infallible>,
     WR: OutputPin<Error = core::convert::Infallible>,
     SIWU: OutputPin<Error = core::convert::Infallible>,
 {
+    // get a counter for fun
     let mut counter: u16 = 0;
 
     let mut buffer: FlatBuffer = BufferRequest.await.into();
 
-    led.off();
-
     loop {
+        // turn off the led
+        led.off();
+        // reset the read buffer
         buffer.reset();
-
+        // increment the counter
         counter += 1;
-
+        // write something to the buffer
         _ = write!(
             buffer,
             "Hello, World 123451234512345123451234512345. count: {}\r\n",
             counter
         );
-
+        // get an immutable slice
         let tx_buffer = buffer.as_ref();
-
-        let _ = writer.write(tx_buffer).await;
-
-        if counter % 5 == 0 {
-            Timer::delay(50).await;
-        }
+        // send it
+        let _ = writer.write_all(tx_buffer).await;
+        // blink the led on
+        led.on();
     }
 }
 
