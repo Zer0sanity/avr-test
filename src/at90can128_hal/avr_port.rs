@@ -65,57 +65,66 @@ where
 
     #[inline(always)]
     fn is_connected(&mut self) -> bool {
-        // get the bus handle
-        let bus = unsafe { self.ptr.as_mut() };
-        // read the pin
-        bus.sense.is_high().unwrap_or(false)
+        unsafe {
+            // get the bus handle
+            let bus = self.ptr.as_ptr();
+            // read the pin
+            (*bus).sense.is_high().unwrap_or(false)
+        }
     }
 
     #[inline(always)]
     fn set_as_output(&mut self) -> Result<(), Self::Error> {
-        // get the bus handle
-        let bus = unsafe { self.ptr.as_mut() };
-        // do we need to reconfigure
-        if bus.state != State::Output {
-            // DDRC register controls pin direction (0xFF sets all 8 pins to output)
-            bus.port.ddrc().write(|w| unsafe { w.bits(0xFF) });
-            // update the state
-            bus.state = State::Output;
+        unsafe {
+            // get the bus handle
+            let bus = self.ptr.as_ptr();
+            // do we need to reconfigure
+            if (*bus).state != State::Output {
+                // DDRC register controls pin direction (0xFF sets all 8 pins to output)
+                (*bus).port.ddrc().write(|w| w.bits(0xFF));
+                // update the state
+                (*bus).state = State::Output;
+            }
         }
         return Ok(());
     }
 
     #[inline(always)]
     fn set_as_input(&mut self) -> Result<(), Self::Error> {
-        // get the bus handle
-        let bus = unsafe { self.ptr.as_mut() };
-        // do we need to reconfigure
-        if bus.state != State::Input {
-            // 0x00 sets all 8 pins to high-impedance input
-            bus.port.ddrc().write(|w| unsafe { w.bits(0x00) });
-            // 0x00 disable pull-ups
-            bus.port.portc().write(|w| unsafe { w.bits(0x00) });
-            // update the state
-            bus.state = State::Input;
+        unsafe {
+            // get the bus handle
+            let bus = self.ptr.as_ptr();
+            // do we need to reconfigure
+            if (*bus).state != State::Input {
+                // 0x00 sets all 8 pins to high-impedance input
+                (*bus).port.ddrc().write(|w| w.bits(0x00));
+                // 0x00 disable pull-ups
+                (*bus).port.portc().write(|w| w.bits(0x00));
+                // update the state
+                (*bus).state = State::Input;
+            }
         }
         Ok(())
     }
 
     #[inline(always)]
     fn write(&mut self, byte: u8) -> Result<(), Self::Error> {
-        // get the bus handle
-        let bus = unsafe { self.ptr.as_mut() };
-
-        // Drive the parallel bus data out onto the PORTC physical lines
-        bus.port.portc().write(|w| unsafe { w.bits(byte) });
+        unsafe {
+            // get the bus handle
+            let bus = self.ptr.as_ptr();
+            // drive the parallel bus data out onto the PORTC physical lines
+            (*bus).port.portc().write(|w| w.bits(byte));
+        }
         Ok(())
     }
 
     #[inline(always)]
     fn read(&self) -> Result<u8, Self::Error> {
-        // get the bus handle
-        let bus = unsafe { self.ptr.as_ref() };
-        // Read the actual electrical logic levels from the physical PINC register
-        Ok(bus.port.pinc().read().bits())
+        unsafe {
+            // get the bus handle
+            let bus = self.ptr.as_ptr();
+            // Read the actual electrical logic levels from the physical PINC register
+            Ok((*bus).port.pinc().read().bits())
+        }
     }
 }

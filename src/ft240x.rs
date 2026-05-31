@@ -1,8 +1,11 @@
 pub mod io_bus_8;
 
-use core::{cell::RefCell, task::{Context, Poll, Waker}};
+use core::{
+    cell::RefCell,
+    task::{Context, Poll, Waker},
+};
 
-use avr_device::{ interrupt::Mutex};
+use avr_device::interrupt::Mutex;
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_io::{ErrorKind, ErrorType};
 use embedded_io_async::{Read, Write};
@@ -13,14 +16,14 @@ use crate::{ft240x::io_bus_8::IoBus8, interrupts::At90Can128Interrupts};
 pub static TX_WAKER: Mutex<RefCell<Option<Waker>>> = Mutex::new(RefCell::new(None));
 pub static RX_WAKER: Mutex<RefCell<Option<Waker>>> = Mutex::new(RefCell::new(None));
 
-// base struct for ft240x 
+// base struct for ft240x
 pub struct Ft240x<BUS, RXF, TXE, RD, WR, SIWU> {
-    bus: BUS,     // port used write/read from FT240
-    rxf: RXF,     // input to tell when data can be read from the FT240.
-    txe: TXE,     // input to tell when the FT240 can accept data.
-    rd: RD,       // output to have the FT240 put a received byte from its FIFO to the data bus
-    wr: WR,       // output to have the FT240 read data byte from data bus to its transmit FIFO
-    siwu: SIWU,   // output to tell the FT240 to flush its transmit FIFO buffer to the PC
+    bus: BUS,   // port used write/read from FT240
+    rxf: RXF,   // input to tell when data can be read from the FT240.
+    txe: TXE,   // input to tell when the FT240 can accept data.
+    rd: RD,     // output to have the FT240 put a received byte from its FIFO to the data bus
+    wr: WR,     // output to have the FT240 read data byte from data bus to its transmit FIFO
+    siwu: SIWU, // output to tell the FT240 to flush its transmit FIFO buffer to the PC
 }
 
 // reader for ft240x
@@ -30,7 +33,7 @@ pub struct Ft240xReader<BUS, RXF, RD> {
     rd: RD,
 }
 
-// writer for ft240x 
+// writer for ft240x
 pub struct Ft240xWriter<BUS, TXE, WR, SIWU> {
     bus: BUS,
     txe: TXE,
@@ -56,25 +59,18 @@ where
         let _ = rd.set_high();
         let _ = wr.set_high();
         let _ = siwu.set_high();
-
         // setup the interrupts
         At90Can128Interrupts::rxf_int_setup();
         At90Can128Interrupts::txe_int_setup();
-        
         // initialize the structure
         Self { bus, rxf, txe, rd, wr, siwu}
     }
 
     // consume self and split up ports
-    pub fn split(self) -> (
-        Ft240xReader<BUS, RXF, RD>, 
-        Ft240xWriter<BUS, TXE, WR, SIWU>
-    ) {
-
-        
+    pub fn split(self) -> (Ft240xReader<BUS, RXF, RD>, Ft240xWriter<BUS, TXE, WR, SIWU>) {
         let reader = Ft240xReader {
             bus: self.bus.replicate(),
-            rxf: self.rxf, 
+            rxf: self.rxf,
             rd: self.rd,
         };
 
@@ -89,8 +85,7 @@ where
     }
 }
 
-
-impl< BUS, RXF, RD> Ft240xReader<BUS, RXF, RD>
+impl<BUS, RXF, RD> Ft240xReader<BUS, RXF, RD>
 where
     BUS: IoBus8,
     RXF: InputPin<Error = core::convert::Infallible>,
@@ -121,12 +116,10 @@ where
         data
     }
 
-    pub fn data_available(&mut self) -> DataAvailableFuture<'_, BUS, RXF, RD>
-{
-    DataAvailableFuture{reader: self}
+    pub fn data_available(&mut self) -> DataAvailableFuture<'_, BUS, RXF, RD> {
+        DataAvailableFuture { reader: self }
+    }
 }
-}
-
 
 pub struct DataAvailableFuture<'a, BUS, RXF, RD> {
     pub reader: &'a mut Ft240xReader<BUS, RXF, RD>,
@@ -137,7 +130,7 @@ where
     BUS: IoBus8,
     RXF: InputPin<Error = core::convert::Infallible>,
     RD: OutputPin<Error = core::convert::Infallible>,
- {
+{
     type Output = Result<(), embedded_io::ErrorKind>;
     fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         /*
@@ -156,16 +149,23 @@ where
             }
             // else no data to read.  register the waker
             *RX_WAKER.borrow(cs).borrow_mut() = Some(cx.waker().clone());
-            // enable interrupts
-            At90Can128Interrupts::rxf_int_enable();
-            // poll pending
-            return Poll::Pending;
+            // sanity check in case the edge was triggered while we were setting up the waker
+            if self.reader.can_read() {
+                // unregister the waker
+                *RX_WAKER.borrow(cs).borrow_mut() = None;
+                // return ready
+                Poll::Ready(Ok(()))
+            } else {
+                // enable interrupts
+                At90Can128Interrupts::rxf_int_enable();
+                // return pending
+                Poll::Pending
+            }
         })
     }
 }
 
-impl<BUS, RXF, RD> ErrorType for Ft240xReader<BUS, RXF, RD>
-{
+impl<BUS, RXF, RD> ErrorType for Ft240xReader<BUS, RXF, RD> {
     type Error = embedded_io::ErrorKind;
 }
 
@@ -205,7 +205,6 @@ where
         Ok(bytes)
     }
 }
-
 
 impl<BUS, TXE, WR, SIWU> Ft240xWriter<BUS, TXE, WR, SIWU>
 where
@@ -247,25 +246,23 @@ where
         //pull the SIWU back up
         let _ = self.siwu.set_high();
     }
-    
-    pub fn data_can_be_written(&mut self) -> DataCanBeWrittenFuture<'_, BUS, TXE, WR, SIWU>
-{
-    DataCanBeWrittenFuture{writer: self}
 
-}
+    pub fn data_can_be_written(&mut self) -> DataCanBeWrittenFuture<'_, BUS, TXE, WR, SIWU> {
+        DataCanBeWrittenFuture { writer: self }
+    }
 }
 
 pub struct DataCanBeWrittenFuture<'a, BUS, TXE, WR, SIWU> {
     pub writer: &'a mut Ft240xWriter<BUS, TXE, WR, SIWU>,
 }
 
-impl<'a, BUS, TXE, WR, SIWU> Future for DataCanBeWrittenFuture<'_,  BUS, TXE, WR, SIWU>
+impl<'a, BUS, TXE, WR, SIWU> Future for DataCanBeWrittenFuture<'_, BUS, TXE, WR, SIWU>
 where
     BUS: IoBus8,
     TXE: InputPin<Error = core::convert::Infallible>,
     WR: OutputPin<Error = core::convert::Infallible>,
     SIWU: OutputPin<Error = core::convert::Infallible>,
- {
+{
     type Output = Result<(), embedded_io::ErrorKind>;
     fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // go interrupt free while we check.  if we have already registered the waker and the interrupt
@@ -279,24 +276,30 @@ where
             // now see if its clear to send
             if self.writer.can_write() {
                 return Poll::Ready(Ok(()));
-            }           
+            }
             // else we cant send.  register the waker
             *TX_WAKER.borrow(cs).borrow_mut() = Some(cx.waker().clone());
-            // enable interrupts
-            At90Can128Interrupts::txe_int_enable();
-            // poll pending
-            return Poll::Pending;
+            // sanity check in case the edge was triggered while we were setting up the waker
+            if self.writer.can_write() {
+                // unregister the waker
+                *TX_WAKER.borrow(cs).borrow_mut() = None;
+                // return ready
+                Poll::Ready(Ok(()))
+            } else {
+                // enable interrupts
+                At90Can128Interrupts::txe_int_enable();
+                // return pending
+                Poll::Pending
+            }
         })
     }
 }
 
-impl<BUS, TXE, WR, SIWU> ErrorType  for Ft240xWriter<BUS, TXE, WR, SIWU>
-{
+impl<BUS, TXE, WR, SIWU> ErrorType for Ft240xWriter<BUS, TXE, WR, SIWU> {
     type Error = embedded_io::ErrorKind;
 }
 
-
-impl<BUS, TXE, WR, SIWU> Write  for Ft240xWriter<BUS, TXE, WR, SIWU>
+impl<BUS, TXE, WR, SIWU> Write for Ft240xWriter<BUS, TXE, WR, SIWU>
 where
     BUS: IoBus8,
     TXE: embedded_hal::digital::InputPin<Error = core::convert::Infallible>,
@@ -338,4 +341,3 @@ where
         Ok(())
     }
 }
-
