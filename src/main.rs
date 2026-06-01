@@ -23,6 +23,7 @@ mod interrupts;
 pub mod led;
 pub mod timer;
 // pub mod usb_ft240;
+mod uart;
 pub mod wait_pin_state;
 
 pub use buffer_handle::*;
@@ -34,6 +35,7 @@ pub use flat_buffer::*;
 pub use led::*;
 pub use timer::*;
 // pub use usb_ft240::*;
+pub use uart::*;
 pub use wait_pin_state::*;
 
 use crate::{
@@ -48,23 +50,30 @@ static USB_BUS: StaticBus<at90can128::PORTC, Pin<Input<AnyInput>, Dynamic>> = St
 fn main() -> ! {
     let dp = at90can128::Peripherals::take().unwrap();
 
-    // let pins = Pins::new(dp.PORTB, dp.PORTC, dp.PORTE, dp.PORTG);
-    let pins = Pins::new(dp.PORTB, dp.PORTE, dp.PORTG);
+    let pins = Pins::new(
+        dp.PORTA, dp.PORTB, /*dp.PORTC,*/ dp.PORTD, dp.PORTE, dp.PORTF, dp.PORTG,
+    );
     let err_led = LED::new(pins.pb6.into_output().downgrade(), true);
     let can_led = LED::new(pins.pb7.into_output().downgrade(), true);
 
+    // network uart (maybe make these more generic and just pass downgraded inputs/outputs and let driver configure)
+    // also the sense/reset/defaults are specific to xpico so maybe don't include in uart
+
+    // let usart = Uart::new(
+    //     dp.USART1, pins.pd2, pins.pd3, pins.pg3, pins.pg4, pins.pd7, pins.pd4, pins.pg0,
+    // );
+
+    // ft240
     let io_bus = BusHandle::init(
         dp.PORTC,
         pins.pg2.into_floating_input().downgrade().forget_imode(),
         &USB_BUS,
     );
-
     let rxf = pins.pe6.into_floating_input().downgrade().forget_imode();
     let txe = pins.pe5.into_floating_input().downgrade().forget_imode();
     let rd = pins.pe4.into_output().downgrade();
     let wr = pins.pe7.into_output().downgrade();
     let siwu = pins.pe2.into_output().downgrade();
-
     // initialize usb
     let ft240 = Ft240x::new(io_bus, rxf, txe, rd, wr, siwu);
     // split it
