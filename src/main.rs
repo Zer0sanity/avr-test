@@ -23,7 +23,7 @@ mod interrupts;
 pub mod led;
 pub mod timer;
 // pub mod usb_ft240;
-mod uart;
+mod avr_uart;
 pub mod wait_pin_state;
 
 pub use buffer_handle::*;
@@ -35,7 +35,7 @@ pub use flat_buffer::*;
 pub use led::*;
 pub use timer::*;
 // pub use usb_ft240::*;
-pub use uart::*;
+pub use avr_uart::*;
 pub use wait_pin_state::*;
 
 use crate::{
@@ -51,17 +51,16 @@ fn main() -> ! {
     let dp = at90can128::Peripherals::take().unwrap();
 
     let pins = Pins::new(
-        dp.PORTA, dp.PORTB, /*dp.PORTC,*/ dp.PORTD, dp.PORTE, dp.PORTF, dp.PORTG,
+        /*dp.PORTA,*/ dp.PORTB, /*dp.PORTC,*/ dp.PORTD, dp.PORTE,
+        /*dp.PORTF,*/ dp.PORTG,
     );
+
     let err_led = LED::new(pins.pb6.into_output().downgrade(), true);
     let can_led = LED::new(pins.pb7.into_output().downgrade(), true);
 
     // network uart (maybe make these more generic and just pass downgraded inputs/outputs and let driver configure)
     // also the sense/reset/defaults are specific to xpico so maybe don't include in uart
-
-    // let usart = Uart::new(
-    //     dp.USART1, pins.pd2, pins.pd3, pins.pg3, pins.pg4, pins.pd7, pins.pd4, pins.pg0,
-    // );
+    // let usart = AvrUart::new(dp.USART1, pins.pg3, pins.pg4, pins.pd7, pins.pd4, pins.pg0);
 
     // ft240
     let io_bus = BusHandle::init(
