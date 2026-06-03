@@ -60,7 +60,7 @@ fn main() -> ! {
 
     // network uart (maybe make these more generic and just pass downgraded inputs/outputs and let driver configure)
     // also the sense/reset/defaults are specific to xpico so maybe don't include in uart
-    // let usart = AvrUart::new(dp.USART1, pins.pg3, pins.pg4, pins.pd7, pins.pd4, pins.pg0);
+    let usart = AvrUart::new(dp.USART1, pins.pg3, pins.pg4, pins.pd7, pins.pd4, pins.pg0);
 
     // ft240
     let io_bus = BusHandle::init(
