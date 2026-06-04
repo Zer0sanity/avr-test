@@ -7,97 +7,85 @@ use avr_hal_generic::port::{
 };
 
 use crate::{
-    CircularBuffer,
+    const_circular_buffer::ConstCircularBuffer,
     hal::{PD4, PD7, PG0, PG3, PG4, Pin},
 };
 
-use at90can128::USART0;
 use at90can128::USART1;
 
-static USART1_READER: Mutex<RefCell<Option<UsartReader<USART1, PG3>>>> =
-    Mutex::new(RefCell::new(None));
-
-static USART1_WRITER: Mutex<RefCell<Option<UsartWriter<USART1, PG4>>>> =
-    Mutex::new(RefCell::new(None));
-
+// struct for reading the usart
 pub struct UsartReader<USART, CTS, const BUFFER_CAPACITY: usize> {
     _usart: PhantomData<USART>,
-    _inner_buffer: [u8; BUFFER_CAPACITY],
-    cts: Pin<Output, CTS>,
-    buffer: CircularBuffer,
+    cts_opt: Option<Pin<Output, CTS>>,
+    buffer: ConstCircularBuffer<BUFFER_CAPACITY>,
 }
 
+impl UsartReader<USART1, PG3, BUFFER_CAPACITY> {
+    pub const fn new() -> Self {
+        Self {
+            _usart: PhantomData,
+            cts_opt: None,
+            buffer: ConstCircularBuffer::new(),
+        }
+    }
+    pub fn init(&mut self, cts_opt: Option<Pin<Output, PG3>>) {
+        self.cts_opt = cts_opt;
+        self.buffer.init();
+    }
+}
+
+// struct for writing usart
 pub struct UsartWriter<USART, RTS, const BUFFER_CAPACITY: usize> {
     _usart: PhantomData<USART>,
-    _inner_buffer: [u8; BUFFER_CAPACITY],
-    : Pin<Input<Floating>, RTS>,
-    flush_char: u8,
-    buffer: CircularBuffer,
+    rts_opt: Option<Pin<Input<Floating>, RTS>>,
+    flush_char: Option<u8>,
+    buffer: ConstCircularBuffer<BUFFER_CAPACITY>,
 }
 
-impl<RTS, const BUFFER_CAPACITY: usize> UsartWriter<USART1, PG3, BUFFER_CAPACITY>
-where
-    RTS: PinOps,
-{
-    pub fn new(rts: Pin<Input<Floating>, RTS>, flush_char: u8) -> Self {
-        // i didn't want to rewrite the circular buffer to have owned storage, first create a writer without a circular buffer
-        let mut writer = Self {
+impl UsartWriter<USART1, PG4, BUFFER_CAPACITY> {
+    pub const fn new() -> Self {
+        Self {
             _usart: PhantomData,
-            _inner_buffer: [0; BUFFER_CAPACITY],
-            rts,
-            flush_char,
-            buffer: unsafe { core::mem::zeroed() },
-        };
-// put into static memory
-    avr_device::interrupt::free(|cs| {
-        let cell = USART1_WRITER.borrow(cs);
-        
-        // Move the struct off the stack and into its permanent global RAM slot
-        cell.replace(Some(writer));
-        
-        // Step 3: Borrow a mutable reference to the moved struct *inside* the static slot.
-        // It is now physically anchored in global RAM, so its address is fixed!
-        if let Some(ref mut anchored_writer) = *cell.borrow_mut() {
-        // get a pointer to the allocated inner buffer
-        let inner_buffer_ptr = anchored_writer._inner_buffer.as_mut_ptr();
-        // initialize the circular buffer
-        anchored_writer.buffer = CircularBuffer::new(raw_array_ptr, BUFFER_CAPACITY);
-
+            rts_opt: None,
+            flush_char: None,
+            buffer: ConstCircularBuffer::new(),
         }
-    });
-
-        
-        // return
-        writer
+    }
+    pub fn init(&mut self, rts_opt: Option<Pin<Input<Floating>, PG4>>) {
+        self.rts_opt = rts_opt;
+        self.buffer.init();
     }
 
-    // Step 2: Tie the pointer to the buffer AFTER it is in its final home
-    // We take `&mut self` to ensure nobody can move it while we link the pointer
-    pub fn init(&mut self) {
-        let inner_buffer_ptr = self._inner_buffer.as_mut_ptr();
-        self.buffer = CircularBuffer::new(inner_buffer_ptr, BUFFER_CAPACITY);
+    #[inline(always)]
+    pub fn write(&mut self, byte: u8) {
+        unsafe {
+            (*USART1::ptr()).udr1().as_ptr().write_volatile(byte);
+        }
     }
 }
 
-// 2. Define your zero-sized Handle struct
-#[derive(Clone, Copy)] // Safe and totally free to copy anywhere
-pub struct UsartWriterHandle;
-
-impl UsartWriterHandle {
-    /// Safe method you can call anywhere in your application or async futures
-    pub fn print_byte(&self, byte: u8) -> Result<(), ()> {
+// define buffer size for interrupt buffers
+const BUFFER_CAPACITY: usize = 64;
+// static shared usart1 reader
+static USART1_READER: Mutex<RefCell<UsartReader<USART1, PG3, BUFFER_CAPACITY>>> =
+    Mutex::new(RefCell::new(UsartReader::new()));
+// static shared usart1 writer
+static USART1_WRITER: Mutex<RefCell<UsartWriter<USART1, PG4, BUFFER_CAPACITY>>> =
+    Mutex::new(RefCell::new(UsartWriter::new()));
+// usart1 handle we can give out to operate on the static shared usart1 writer
+pub struct Usart1ReaderHandle;
+// usart1 handle we can give out to operate on the static shared usart1 writer
+pub struct Usart1WriterHandle;
+impl Usart1WriterHandle {
+    pub fn write(&self, byte: u8) -> Result<(), ()> {
         // Enforce the critical section under the hood
         avr_device::interrupt::free(|cs| {
-            if let Some(ref mut writer) = *USART1_WRITER.borrow(cs).borrow_mut() {
-                // Safely push into the circular buffer anchored in global RAM
-                writer.buffer.push(byte)
-            } else {
-                Err(()) // Global writer wasn't initialized yet
-            }
-        })
+            let mut writer = USART1_WRITER.borrow(cs).borrow_mut();
+            (*writer).write(byte);
+        });
+        Ok(())
     }
 }
-
 
 // base struct for ft240x
 pub struct AvrUart<USART, CTS, RTS, SENSE, RESET, DEFAULTS>
@@ -116,22 +104,15 @@ where
     defaults: Pin<Output, DEFAULTS>,
 }
 
-impl<CTS, RTS, SENSE, RESET, DEFAULTS> AvrUart<USART1, CTS, RTS, SENSE, RESET, DEFAULTS>
-where
-    CTS: PinOps,
-    RTS: PinOps,
-    SENSE: PinOps,
-    RESET: PinOps,
-    DEFAULTS: PinOps,
-{
-    pub fn split(
+impl AvrUart<USART1, PG3, PG4, PD7, PD4, PG0> {
+    pub fn init(
         usart: at90can128::USART1,
-        cts: Pin<Input<Floating>, CTS>,
-        rts: Pin<Input<Floating>, RTS>,
-        sense: Pin<Input<Floating>, SENSE>,
-        reset: Pin<Input<Floating>, RESET>,
-        defaults: Pin<Input<Floating>, DEFAULTS>,
-    ) -> (UsartReader<USART1, CTS>, UsartWriter<USART1, RTS>) {
+        cts: Pin<Input<Floating>, PG3>,
+        rts: Pin<Input<Floating>, PG4>,
+        sense: Pin<Input<Floating>, PD7>,
+        reset: Pin<Input<Floating>, PD4>,
+        defaults: Pin<Input<Floating>, PG0>,
+    ) -> (Usart1ReaderHandle, Usart1WriterHandle) {
         // control register a
         usart.ucsr1a().modify(|_, w| {
             // disable double speed
@@ -172,18 +153,20 @@ where
 
         let cts = cts.into_output();
         let rts = rts.into_floating_input();
-        let sense = sense.into_pull_up_input();
-        let reset = reset.into_output_high();
-        let defaults = defaults.into_output_high();
+        let _sense = sense.into_pull_up_input();
+        let _reset = reset.into_output_high();
+        let _defaults = defaults.into_output_high();
 
-        Self {
-            usart,
-            cts,
-            rts,
-            sense,
-            reset,
-            defaults,
-        }
+        // put into static memory
+        avr_device::interrupt::free(|cs| {
+            let mut reader = USART1_READER.borrow(cs).borrow_mut();
+            reader.init(Some(cts));
+            let mut writer = USART1_WRITER.borrow(cs).borrow_mut();
+            writer.init(Some(rts));
+        });
+
+        // return
+        (Usart1ReaderHandle, Usart1WriterHandle)
     }
 }
 

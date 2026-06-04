@@ -24,6 +24,7 @@ pub mod led;
 pub mod timer;
 // pub mod usb_ft240;
 mod avr_uart;
+mod const_circular_buffer;
 pub mod wait_pin_state;
 
 pub use buffer_handle::*;
@@ -60,7 +61,10 @@ fn main() -> ! {
 
     // network uart (maybe make these more generic and just pass downgraded inputs/outputs and let driver configure)
     // also the sense/reset/defaults are specific to xpico so maybe don't include in uart
-    let usart = AvrUart::new(dp.USART1, pins.pg3, pins.pg4, pins.pd7, pins.pd4, pins.pg0);
+    let (ethernet_reader, ethernet_writer) =
+        AvrUart::init(dp.USART1, pins.pg3, pins.pg4, pins.pd7, pins.pd4, pins.pg0);
+
+    ethernet_writer.write(0x31);
 
     // ft240
     let io_bus = BusHandle::init(
