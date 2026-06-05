@@ -64,8 +64,6 @@ fn main() -> ! {
     let (ethernet_reader, ethernet_writer) =
         AvrUart::init(dp.USART1, pins.pg3, pins.pg4, pins.pd7, pins.pd4, pins.pg0);
 
-    ethernet_writer.write(0x31);
-
     // ft240
     let io_bus = BusHandle::init(
         dp.PORTC,
@@ -86,7 +84,7 @@ fn main() -> ! {
 
     let combined_future = Join {
         a: ft240_reader_task(reader, err_led),
-        b: ft240_writer_task(writer, can_led),
+        b: usart1_reader_task(ethernet_reader, can_led),
     };
 
     unsafe {
@@ -98,6 +96,25 @@ fn main() -> ! {
     executor.run();
 
     loop {}
+}
+
+pub async fn usart1_reader_task(mut reader: Usart1ReaderHandle, mut led: LED) {
+    let mut counter: u16 = 0;
+
+    let mut buffer: FlatBuffer = BufferRequest.await.into();
+    // turn off the led
+    led.off();
+
+    loop {
+        // reset the read buffer
+        buffer.reset();
+        // get the buffer as a mutable slice
+        let rx_buffer = buffer.as_mut();
+        // preform a read
+        let _ = reader.read(rx_buffer).await;
+        // blink the led on
+        led.toggle();
+    }
 }
 
 pub async fn ft240_reader_task<BUS, RXF, RD>(mut reader: Ft240xReader<BUS, RXF, RD>, mut led: LED)
@@ -124,41 +141,41 @@ where
     }
 }
 
-pub async fn ft240_writer_task<BUS, TXE, WR, SIWU>(
-    mut writer: Ft240xWriter<BUS, TXE, WR, SIWU>,
-    mut led: LED,
-) where
-    BUS: IoBus8,
-    TXE: InputPin<Error = core::convert::Infallible>,
-    WR: OutputPin<Error = core::convert::Infallible>,
-    SIWU: OutputPin<Error = core::convert::Infallible>,
-{
-    // get a counter for fun
-    let mut counter: u16 = 0;
+// pub async fn ft240_writer_task<BUS, TXE, WR, SIWU>(
+//     mut writer: Ft240xWriter<BUS, TXE, WR, SIWU>,
+//     mut led: LED,
+// ) where
+//     BUS: IoBus8,
+//     TXE: InputPin<Error = core::convert::Infallible>,
+//     WR: OutputPin<Error = core::convert::Infallible>,
+//     SIWU: OutputPin<Error = core::convert::Infallible>,
+// {
+//     // get a counter for fun
+//     let mut counter: u16 = 0;
 
-    let mut buffer: FlatBuffer = BufferRequest.await.into();
+//     let mut buffer: FlatBuffer = BufferRequest.await.into();
 
-    loop {
-        // turn off the led
-        led.off();
-        // reset the read buffer
-        buffer.reset();
-        // increment the counter
-        counter += 1;
-        // write something to the buffer
-        _ = write!(
-            buffer,
-            "Hello, World 123451234512345123451234512345. count: {}\r\n",
-            counter
-        );
-        // get an immutable slice
-        let tx_buffer = buffer.as_ref();
-        // send it
-        let _ = writer.write_all(tx_buffer).await;
-        // blink the led on
-        led.on();
-    }
-}
+//     loop {
+//         // turn off the led
+//         led.off();
+//         // reset the read buffer
+//         buffer.reset();
+//         // increment the counter
+//         counter += 1;
+//         // write something to the buffer
+//         _ = write!(
+//             buffer,
+//             "Hello, World 123451234512345123451234512345. count: {}\r\n",
+//             counter
+//         );
+//         // get an immutable slice
+//         let tx_buffer = buffer.as_ref();
+//         // send it
+//         let _ = writer.write_all(tx_buffer).await;
+//         // blink the led on
+//         led.on();
+//     }
+// }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
