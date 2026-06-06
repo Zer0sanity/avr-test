@@ -72,6 +72,21 @@ impl UsartReader<USART1, PG3, BUFFER_CAPACITY> {
             waker.wake();
         }
     }
+
+    // read a byte to the buffer, handle the cts line
+    #[inline(always)]
+    pub fn read_byte(&mut self) -> Option<u8> {
+        // read a byte from the buffer
+        let byte_opt = self.buffer.read_byte().ok();
+        // get the free space
+        let free_space = self.buffer.free_space();
+        // manage cts
+        if free_space > Self::ASSERT_THRESHOLD {
+            self.cts_opt.as_mut().map(|cts| cts.set_high());
+        }
+        // return
+        byte_opt
+    }
 }
 
 #[avr_device::interrupt(at90can128)]
@@ -94,12 +109,12 @@ impl ErrorType for Usart1ReaderHandle {
 
 impl Read for Usart1ReaderHandle {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        // did we get called with a full buffer
-        if buf.len() == 0 {
+        // did we get called with an empty buffer
+        if buf.is_empty() {
             return Err(ErrorKind::InvalidInput);
         }
         // wait until we can read
-        if let Err(kind) = Usart1DataAvailable.await {
+        if let Err(kind) = Usart1CanRead.await {
             return Err(kind);
         }
         // initialize the number of bytes read
@@ -111,7 +126,7 @@ impl Read for Usart1ReaderHandle {
             // walk the buffer
             for slot in buf.iter_mut() {
                 // we know we can read at least one, from the data available await above
-                if let Ok(byte) = reader.buffer.read_byte() {
+                if let Some(byte) = reader.read_byte() {
                     *slot = byte;
                     // increment the number of bytes read
                     bytes += 1;
@@ -126,12 +141,12 @@ impl Read for Usart1ReaderHandle {
 }
 
 // a struct that implements the future trait that will wait for data available to be read from USART1_READER
-struct Usart1DataAvailable;
+struct Usart1CanRead;
 
-impl Future for Usart1DataAvailable {
+impl Future for Usart1CanRead {
     type Output = Result<(), embedded_io::ErrorKind>;
 
-    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // go interrupt free for the check
         avr_device::interrupt::free(|cs| {
             // get the reader
@@ -165,6 +180,8 @@ pub struct UsartWriter<USART, RTS, const BUFFER_CAPACITY: usize> {
     rts_opt: Option<Pin<Input<Floating>, RTS>>,
     flush_char: Option<u8>,
     buffer: ConstCircularBuffer<BUFFER_CAPACITY>,
+    waker: Option<Waker>,
+    tx_idle: bool,
 }
 
 impl UsartWriter<USART1, PG4, BUFFER_CAPACITY> {
@@ -174,6 +191,8 @@ impl UsartWriter<USART1, PG4, BUFFER_CAPACITY> {
             rts_opt: None,
             flush_char: None,
             buffer: ConstCircularBuffer::new(),
+            waker: None,
+            tx_idle: true,
         }
     }
     pub fn init(&mut self, rts_opt: Option<Pin<Input<Floating>, PG4>>) {
@@ -181,11 +200,122 @@ impl UsartWriter<USART1, PG4, BUFFER_CAPACITY> {
         self.buffer.init();
     }
 
+    // write a byte to the buffer, handle the cts line, kick the waker if its set
     #[inline(always)]
-    pub fn write(&mut self, byte: u8) {
-        unsafe {
-            (*USART1::ptr()).udr1().as_ptr().write_volatile(byte);
+    pub fn write_byte(&mut self, byte: u8) {
+        // get the free space
+        let free_space = self.buffer.free_space();
+        // write the byte.
+        if free_space > 0 {
+            _ = self.buffer.write_byte(byte);
         }
+    }
+}
+
+#[avr_device::interrupt(at90can128)]
+fn USART1_TX() {
+    // forge a token. this is safe ONLY because we are in an ISR
+    let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
+    // get the writer
+    let mut writer = USART1_WRITER.borrow(cs).borrow_mut();
+    // check if we can send
+    let rts_ok = writer
+        .rts_opt
+        .as_ref()
+        .map(|rts| rts.is_high())
+        .unwrap_or(true);
+    // if we can send try to read a byte from writer
+    if rts_ok && let Ok(byte) = writer.buffer.read_byte() {
+        // write it to the hardware
+        unsafe { (*USART1::ptr()).udr1().write(|w| w.bits(byte)) };
+    } else {
+        // disable interrupts
+        unsafe { (*USART1::ptr()).ucsr1b().write(|w| w.udrie1().clear_bit()) };
+        // set the tx_idle flag
+        writer.tx_idle = true;
+    }
+    // are we returning a byte and the waker is set wake it
+    if let Some(waker) = writer.waker.take() {
+        waker.wake();
+    }
+}
+
+// usart1 handle we can give out to operate on the static shared usart1 writer
+pub struct Usart1WriterHandle;
+impl ErrorType for Usart1WriterHandle {
+    type Error = embedded_io::ErrorKind;
+}
+
+impl Write for Usart1WriterHandle {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        // did we get called with a empty buffer
+        if buf.is_empty() {
+            return Err(ErrorKind::InvalidInput);
+        }
+        // wait until we can write
+        if let Err(kind) = Usart1CanWrite.await {
+            return Err(kind);
+        }
+        // go interrupt free while we write bytes
+        let write_result = avr_device::interrupt::free(|cs| {
+            // get the writer
+            let mut writer = USART1_WRITER.borrow(cs).borrow_mut();
+            // write the data
+            let write_result = writer.buffer.write(buf);
+            // see if we need to enable interrupts
+            if writer.tx_idle {
+                // enable interrupts
+                unsafe { (*USART1::ptr()).ucsr1b().write(|w| w.udrie1().set_bit()) };
+                // clear the tx_idle flag
+                writer.tx_idle = false;
+            }
+            // return the write result
+            write_result
+        });
+        // map the error
+        write_result.map_err(|e| e.into())
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        todo!()
+        // going to need another future to wait until the buffer is empty.
+        // wait until we can write
+        // write the flush character
+        // wait until the buffer is empty
+    }
+}
+
+// a struct that implements the future trait that will wait for space available in USART1_WRITER buffer
+struct Usart1CanWrite;
+
+impl Future for Usart1CanWrite {
+    type Output = Result<(), embedded_io::ErrorKind>;
+
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // go interrupt free for the check
+        avr_device::interrupt::free(|cs| {
+            // get the writer
+            let mut writer = USART1_WRITER.borrow(cs).borrow_mut();
+            // see if there is space to write
+            if !writer.buffer.is_full() {
+                return Poll::Ready(Ok(()));
+            }
+            // we can check if we are connected and throw an error
+            let mut control = USART1_CONTROL.borrow(cs).borrow_mut();
+            let connected = if let Some(sense) = control.sense_opt.as_mut() {
+                sense.is_high()
+            } else {
+                true
+            };
+            // if not connected return an error
+            if !connected {
+                return Poll::Ready(Err(ErrorKind::NotConnected));
+            }
+            // else no space available to write.  register the waker
+            writer.waker = Some(cx.waker().clone());
+            // return pending
+            Poll::Pending
+        })
     }
 }
 
@@ -227,19 +357,6 @@ static USART1_WRITER: Mutex<RefCell<UsartWriter<USART1, PG4, BUFFER_CAPACITY>>> 
 // control signals for usart 1 (xpico and matchport)
 static USART1_CONTROL: Mutex<RefCell<UsartControlSignals<PD7, PD4, PG0>>> =
     Mutex::new(RefCell::new(UsartControlSignals::new()));
-
-// usart1 handle we can give out to operate on the static shared usart1 writer
-pub struct Usart1WriterHandle;
-impl Usart1WriterHandle {
-    pub fn write(&self, byte: u8) -> Result<(), ()> {
-        // Enforce the critical section under the hood
-        avr_device::interrupt::free(|cs| {
-            let mut writer = USART1_WRITER.borrow(cs).borrow_mut();
-            (*writer).write(byte);
-        });
-        Ok(())
-    }
-}
 
 // base struct for ft240x
 pub struct AvrUart<USART, CTS, RTS, SENSE, RESET, DEFAULTS>

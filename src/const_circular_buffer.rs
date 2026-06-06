@@ -117,7 +117,7 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
     }
 
     #[inline(always)]
-    pub fn write(&mut self, bytes: &[u8]) -> Result<usize> {
+    pub fn write_all(&mut self, bytes: &[u8]) -> Result<usize> {
         // get the length
         let bytes_len = bytes.len();
         // first see if it will fit
@@ -153,6 +153,54 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
         }
         // return
         Ok(bytes_len)
+    }
+
+    #[inline(always)]
+    pub fn write(&mut self, bytes: &[u8]) -> Result<usize> {
+        // first see if it will fit
+        if self.is_full() {
+            return Err(BufferError::InsufficientSpace);
+        }
+        // get the length
+        let bytes_len = bytes.len();
+        // get the free space
+        let free_space = self.free_space();
+        // figure out how much we can write
+        let bytes_written = if bytes_len <= free_space {
+            bytes_len
+        } else {
+            free_space
+        };
+
+        // get the length from the write pointer to the end
+        let space_to_end = unsafe { self.end_ptr.offset_from(self.write_ptr) as usize };
+        // figure out if we can copy the whole thing or just to the end of the buffer
+        let first_copy_len = core::cmp::min(bytes_written, space_to_end);
+        unsafe {
+            // preform the copy
+            core::slice::from_raw_parts_mut(self.write_ptr, first_copy_len)
+                .copy_from_slice(&bytes[..first_copy_len]);
+            // update the write pointer
+            self.write_ptr = self.write_ptr.add(first_copy_len);
+            // check for wrapping
+            if self.write_ptr == self.end_ptr {
+                self.write_ptr = self.start_ptr;
+            }
+        }
+        // figure out if we have a second half to write
+        let second_copy_len = bytes_written - first_copy_len;
+        if second_copy_len > 0 {
+            unsafe {
+                // preform the copy
+                core::slice::from_raw_parts_mut(self.start_ptr, second_copy_len)
+                    .copy_from_slice(&bytes[first_copy_len..]);
+
+                // update the write pointer
+                self.write_ptr = self.start_ptr.add(second_copy_len);
+            }
+        }
+        // return
+        Ok(bytes_written)
     }
 }
 

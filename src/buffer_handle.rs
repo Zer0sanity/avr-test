@@ -1,11 +1,22 @@
 use core::{error::Error, fmt};
 
+use embedded_io::ErrorKind;
+
 use crate::{BufferRequest, CircularBuffer, FlatBuffer};
 
 #[derive(Debug)]
 pub enum BufferError {
     BufferEmpty,
     InsufficientSpace,
+}
+
+impl From<BufferError> for embedded_io::ErrorKind {
+    fn from(err: BufferError) -> Self {
+        match err {
+            BufferError::BufferEmpty => ErrorKind::WriteZero,
+            BufferError::InsufficientSpace => ErrorKind::OutOfMemory,
+        }
+    }
 }
 
 impl fmt::Display for BufferError {

@@ -176,8 +176,8 @@ where
     RD: OutputPin<Error = core::convert::Infallible>,
 {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        // did we get called with a full buffer
-        if buf.len() == 0 {
+        // did we get called with an empty buffer
+        if buf.is_empty() {
             return Err(ErrorKind::InvalidInput);
         }
         // wait until we can read
