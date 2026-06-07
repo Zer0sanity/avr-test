@@ -31,7 +31,7 @@ impl UsartReader<USART1, PG3, BUFFER_CAPACITY> {
     // deassert when 25% available
     const DEASSERT_THRESHOLD: usize = BUFFER_CAPACITY / 4;
     // assert when 50% available
-    const ASSERT_THRESHOLD: usize = BUFFER_CAPACITY / 2;
+    const REASSERT_THRESHOLD: usize = BUFFER_CAPACITY / 2;
     // const initializer so this can be created in static ram
     pub const fn new() -> Self {
         Self {
@@ -53,39 +53,8 @@ impl UsartReader<USART1, PG3, BUFFER_CAPACITY> {
                 .ucsr1b()
                 .modify(|_, w| w.rxcie1().set_bit());
         }
-    }
-    // write a byte to the buffer, handle the cts line, kick the waker if its set
-    #[inline(always)]
-    pub fn write_byte(&mut self, byte: u8) {
-        // get the free space
-        let free_space = self.buffer.free_space();
-        // write the byte.
-        if free_space > 0 {
-            _ = self.buffer.write_byte(byte);
-        }
-        // manage cts
-        if free_space <= Self::DEASSERT_THRESHOLD {
-            self.cts_opt.as_mut().map(|cts| cts.set_low());
-        }
-        // kick the waker if its set
-        if let Some(waker) = self.waker.take() {
-            waker.wake();
-        }
-    }
-
-    // read a byte to the buffer, handle the cts line
-    #[inline(always)]
-    pub fn read_byte(&mut self) -> Option<u8> {
-        // read a byte from the buffer
-        let byte_opt = self.buffer.read_byte().ok();
-        // get the free space
-        let free_space = self.buffer.free_space();
-        // manage cts
-        if free_space > Self::ASSERT_THRESHOLD {
-            self.cts_opt.as_mut().map(|cts| cts.set_high());
-        }
-        // return
-        byte_opt
+        // set cts (active low)
+        self.cts_opt.as_mut().map(|cts| cts.set_low());
     }
 }
 
@@ -97,8 +66,16 @@ fn USART1_RX() {
     let mut reader = USART1_READER.borrow(cs).borrow_mut();
     // read the byte from the hardware
     let byte = unsafe { (*USART1::ptr()).udr1().read().bits() };
-    // write it to the reader
-    reader.write_byte(byte);
+    // write the byte.
+    _ = reader.buffer.write_byte(byte);
+    // manage cts
+    if reader.buffer.free_space() < UsartReader::DEASSERT_THRESHOLD {
+        reader.cts_opt.as_mut().map(|cts| cts.set_high());
+    }
+    // kick the waker if its set
+    if let Some(waker) = reader.waker.take() {
+        waker.wake();
+    }
 }
 
 // usart1 handle we can give out to operate on the static shared usart1 writer
@@ -126,13 +103,17 @@ impl Read for Usart1ReaderHandle {
             // walk the buffer
             for slot in buf.iter_mut() {
                 // we know we can read at least one, from the data available await above
-                if let Some(byte) = reader.read_byte() {
+                if let Ok(byte) = reader.buffer.read_byte() {
                     *slot = byte;
                     // increment the number of bytes read
                     bytes += 1;
                 } else {
                     break;
                 }
+            }
+            // manage cts
+            if UsartReader::REASSERT_THRESHOLD < reader.buffer.free_space() {
+                reader.cts_opt.as_mut().map(|cts| cts.set_low());
             }
         });
         // here we read at least one so, return the number of bytes read
@@ -155,13 +136,13 @@ impl Future for Usart1CanRead {
             if reader.buffer.len() > 0 {
                 return Poll::Ready(Ok(()));
             }
-            // we can check if we are connected and throw an error
-            let mut control = USART1_CONTROL.borrow(cs).borrow_mut();
-            let connected = if let Some(sense) = control.sense_opt.as_mut() {
-                sense.is_high()
-            } else {
-                true
-            };
+            // check if we are connected
+            let connected = USART1_CONTROL
+                .borrow(cs)
+                .borrow_mut()
+                .sense_opt
+                .as_ref()
+                .is_none_or(|sense| sense.is_high());
             // if not connected return an error
             if !connected {
                 return Poll::Ready(Err(ErrorKind::NotConnected));
@@ -178,9 +159,9 @@ impl Future for Usart1CanRead {
 pub struct UsartWriter<USART, RTS, const BUFFER_CAPACITY: usize> {
     _usart: PhantomData<USART>,
     rts_opt: Option<Pin<Input<Floating>, RTS>>,
-    flush_char: Option<u8>,
+    flush_char_opt: Option<u8>,
     buffer: ConstCircularBuffer<BUFFER_CAPACITY>,
-    waker: Option<Waker>,
+    waker_opt: Option<Waker>,
     tx_idle: bool,
 }
 
@@ -189,26 +170,15 @@ impl UsartWriter<USART1, PG4, BUFFER_CAPACITY> {
         Self {
             _usart: PhantomData,
             rts_opt: None,
-            flush_char: None,
+            flush_char_opt: None,
             buffer: ConstCircularBuffer::new(),
-            waker: None,
+            waker_opt: None,
             tx_idle: true,
         }
     }
     pub fn init(&mut self, rts_opt: Option<Pin<Input<Floating>, PG4>>) {
         self.rts_opt = rts_opt;
         self.buffer.init();
-    }
-
-    // write a byte to the buffer, handle the cts line, kick the waker if its set
-    #[inline(always)]
-    pub fn write_byte(&mut self, byte: u8) {
-        // get the free space
-        let free_space = self.buffer.free_space();
-        // write the byte.
-        if free_space > 0 {
-            _ = self.buffer.write_byte(byte);
-        }
     }
 }
 
@@ -219,11 +189,7 @@ fn USART1_TX() {
     // get the writer
     let mut writer = USART1_WRITER.borrow(cs).borrow_mut();
     // check if we can send
-    let rts_ok = writer
-        .rts_opt
-        .as_ref()
-        .map(|rts| rts.is_high())
-        .unwrap_or(true);
+    let rts_ok = writer.rts_opt.as_ref().is_none_or(|rts| rts.is_low());
     // if we can send try to read a byte from writer
     if rts_ok && let Ok(byte) = writer.buffer.read_byte() {
         // write it to the hardware
@@ -235,7 +201,7 @@ fn USART1_TX() {
         writer.tx_idle = true;
     }
     // are we returning a byte and the waker is set wake it
-    if let Some(waker) = writer.waker.take() {
+    if let Some(waker) = writer.waker_opt.take() {
         waker.wake();
     }
 }
@@ -277,11 +243,29 @@ impl Write for Usart1WriterHandle {
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        todo!()
         // going to need another future to wait until the buffer is empty.
         // wait until we can write
-        // write the flush character
+        if let Err(kind) = Usart1CanWrite.await {
+            return Err(kind);
+        }
+        // go interrupt free while we write the flush character
+        avr_device::interrupt::free(|cs| {
+            // get the writer
+            let mut writer = USART1_WRITER.borrow(cs).borrow_mut();
+            // write the flush character
+            writer
+                .flush_char_opt
+                .map(|flush_char| writer.buffer.write_byte(flush_char));
+            // see if we need to enable interrupts
+            if writer.tx_idle {
+                // enable interrupts
+                unsafe { (*USART1::ptr()).ucsr1b().write(|w| w.udrie1().set_bit()) };
+                // clear the tx_idle flag
+                writer.tx_idle = false;
+            }
+        });
         // wait until the buffer is empty
+        return Usart1TxBufferEmpty.await;
     }
 }
 
@@ -300,19 +284,52 @@ impl Future for Usart1CanWrite {
             if !writer.buffer.is_full() {
                 return Poll::Ready(Ok(()));
             }
-            // we can check if we are connected and throw an error
-            let mut control = USART1_CONTROL.borrow(cs).borrow_mut();
-            let connected = if let Some(sense) = control.sense_opt.as_mut() {
-                sense.is_high()
-            } else {
-                true
-            };
+            // check if we are connected
+            let connected = USART1_CONTROL
+                .borrow(cs)
+                .borrow_mut()
+                .sense_opt
+                .as_ref()
+                .is_none_or(|sense| sense.is_high());
             // if not connected return an error
             if !connected {
                 return Poll::Ready(Err(ErrorKind::NotConnected));
             }
             // else no space available to write.  register the waker
-            writer.waker = Some(cx.waker().clone());
+            writer.waker_opt = Some(cx.waker().clone());
+            // return pending
+            Poll::Pending
+        })
+    }
+}
+
+struct Usart1TxBufferEmpty;
+
+impl Future for Usart1TxBufferEmpty {
+    type Output = Result<(), embedded_io::ErrorKind>;
+
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // go interrupt free for the check
+        avr_device::interrupt::free(|cs| {
+            // get the writer
+            let mut writer = USART1_WRITER.borrow(cs).borrow_mut();
+            // see if its empty
+            if writer.buffer.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            // check if we are connected
+            let connected = USART1_CONTROL
+                .borrow(cs)
+                .borrow_mut()
+                .sense_opt
+                .as_ref()
+                .is_none_or(|sense| sense.is_high());
+            // if not connected return an error
+            if !connected {
+                return Poll::Ready(Err(ErrorKind::NotConnected));
+            }
+            // else no space available to write.  register the waker
+            writer.waker_opt = Some(cx.waker().clone());
             // return pending
             Poll::Pending
         })
@@ -424,9 +441,9 @@ impl AvrUart<USART1, PG3, PG4, PD7, PD4, PG0> {
 
         let cts = cts.into_output();
         let rts = rts.into_floating_input();
-        let sense = sense.into_pull_up_input();
-        let reset = reset.into_output_high();
-        let defaults = defaults.into_output_high();
+        let _sense = sense.into_pull_up_input();
+        let _reset = reset.into_output_high();
+        let _defaults = defaults.into_output_high();
 
         // put into static memory
         avr_device::interrupt::free(|cs| {
@@ -438,7 +455,8 @@ impl AvrUart<USART1, PG3, PG4, PD7, PD4, PG0> {
             writer.init(Some(rts));
             // control pins
             let mut control = USART1_CONTROL.borrow(cs).borrow_mut();
-            control.init(Some(sense), Some(reset), Some(defaults));
+            // control.init(Some(sense), Some(reset), Some(defaults));
+            control.init(None, None, None);
         });
 
         // return

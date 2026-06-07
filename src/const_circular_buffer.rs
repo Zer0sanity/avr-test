@@ -70,6 +70,12 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
     }
 
     #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        // if length is zero
+        self.len() == 0
+    }
+
+    #[inline(always)]
     pub fn reset(&mut self) -> usize {
         // reset pointers to the start
         self.read_ptr = self.start_ptr;
