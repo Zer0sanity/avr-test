@@ -1,4 +1,4 @@
-use core::fmt;
+use core::{cmp::min, fmt};
 
 use crate::BufferError;
 
@@ -9,94 +9,69 @@ unsafe impl<const CAPACITY: usize> Send for ConstCircularBuffer<CAPACITY> {}
 // unsafe impl Sync for ConstCircularBuffer {}
 
 pub struct ConstCircularBuffer<const CAPACITY: usize> {
-    // pointer to the start of the buffer
-    start_ptr: *mut u8,
-    // pointer to the end of the buffer
-    end_ptr: *mut u8,
-    // read pointer
-    read_ptr: *mut u8,
-    // write pointer
-    write_ptr: *mut u8,
+    // read position
+    r_pos: usize,
+    // write position
+    w_pos: usize,
+    // tracked length
+    len: usize,
     // our storage
-    _buffer: [u8; CAPACITY],
+    buf: [u8; CAPACITY],
 }
 
 impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
     pub const fn new() -> Self {
         Self {
-            start_ptr: core::ptr::null_mut(),
-            end_ptr: core::ptr::null_mut(),
-            read_ptr: core::ptr::null_mut(),
-            write_ptr: core::ptr::null_mut(),
-            _buffer: [0; CAPACITY],
+            r_pos: 0,
+            w_pos: 0,
+            len: 0,
+            buf: [0; CAPACITY],
         }
-    }
-
-    pub fn init(&mut self) {
-        // now that the buffer has been placed in static memory, we must wire up pointers
-        let start_ptr = self._buffer.as_mut_ptr();
-        let end_ptr = unsafe { self.start_ptr.add(CAPACITY as usize) };
-        self.start_ptr = start_ptr;
-        self.end_ptr = end_ptr;
-        self.read_ptr = start_ptr;
-        self.write_ptr = start_ptr;
     }
 
     #[inline(always)]
     pub fn len(&self) -> usize {
-        // get the offset between the read and write pointers
-        let offset = unsafe { self.write_ptr.offset_from(self.read_ptr) };
-        // if the offset is less then 0 the write pointer has wrapped around
-        let len = if offset < 0 {
-            CAPACITY as isize + offset
-        } else {
-            offset
-        };
-        // cast length to a usize
-        len as usize
+        self.len
     }
 
     #[inline(always)]
     pub fn free_space(&self) -> usize {
-        // since we don't track length, we always want to leave one slot open so the
-        // write pointer never equals the read pointer so subtract 1
-        CAPACITY - self.len() - 1
+        CAPACITY - self.len
     }
 
     #[inline(always)]
     pub fn is_full(&self) -> bool {
-        // if free space is zero
-        self.free_space() == 0
+        self.len == CAPACITY
     }
 
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        // if length is zero
-        self.len() == 0
+        self.len == 0
     }
 
     #[inline(always)]
     pub fn reset(&mut self) -> usize {
-        // reset pointers to the start
-        self.read_ptr = self.start_ptr;
-        self.write_ptr = self.start_ptr;
-        // return the capacity
-        return CAPACITY - 1;
+        self.r_pos = 0;
+        self.w_pos = 0;
+        self.len = 0;
+        return CAPACITY;
     }
 
     #[inline(always)]
     pub fn read_byte(&mut self) -> Result<u8> {
         // is there anything to read
-        if self.read_ptr == self.write_ptr {
+        if self.is_empty() {
             return Err(BufferError::BufferEmpty);
         }
         // read a byte
-        let byte = unsafe { self.read_ptr.read_volatile() };
-        // update the read pointer
-        self.read_ptr = unsafe { self.read_ptr.add(1) };
+        let byte = self.buf[self.r_pos];
+        // update the length
+        self.len -= 1;
+        // update the read position
+        self.r_pos += 1;
         // check for wrapping
-        if self.read_ptr == self.end_ptr {
-            self.read_ptr = self.start_ptr;
+        if self.r_pos == CAPACITY {
+            self.r_pos = 0;
         }
         // return the next byte
         Ok(byte)
@@ -104,20 +79,20 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
 
     #[inline(always)]
     pub fn write_byte(&mut self, byte: u8) -> Result<()> {
-        // get the next write position
-        let mut next_write_ptr = unsafe { self.write_ptr.add(1) };
-        // check for wrapping
-        if next_write_ptr == self.end_ptr {
-            next_write_ptr = self.start_ptr;
-        }
-        // if the next write position equals the read position we are full
-        if next_write_ptr == self.read_ptr {
+        // are we full
+        if self.is_full() {
             return Err(BufferError::InsufficientSpace);
         }
         // write the byte
-        unsafe { self.write_ptr.write_volatile(byte) };
-        // update the write pointer
-        self.write_ptr = next_write_ptr;
+        self.buf[self.w_pos] = byte;
+        // update the length
+        self.len += 1;
+        // update the write position
+        self.w_pos += 1;
+        // check for wrapping
+        if self.w_pos == CAPACITY {
+            self.w_pos = 0;
+        }
         // everything is fine
         Ok(())
     }
@@ -125,40 +100,36 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
     #[inline(always)]
     pub fn write_all(&mut self, bytes: &[u8]) -> Result<usize> {
         // get the length
-        let bytes_len = bytes.len();
+        let len = bytes.len();
         // first see if it will fit
-        if self.free_space() < bytes_len {
+        if self.free_space() < len {
             return Err(BufferError::InsufficientSpace);
         }
-        // get the length from the write pointer to the end
-        let space_to_end = unsafe { self.end_ptr.offset_from(self.write_ptr) as usize };
+        // get the length from the write position to the end
+        let len_to_end = CAPACITY - self.w_pos;
         // figure out if we can copy the whole thing or just to the end of the buffer
-        let first_copy_len = core::cmp::min(bytes_len, space_to_end);
-        unsafe {
-            // preform the copy
-            core::slice::from_raw_parts_mut(self.write_ptr, first_copy_len)
-                .copy_from_slice(&bytes[..first_copy_len]);
-            // update the write pointer
-            self.write_ptr = self.write_ptr.add(first_copy_len);
-            // check for wrapping
-            if self.write_ptr == self.end_ptr {
-                self.write_ptr = self.start_ptr;
-            }
+        let first_copy_len = min(len, len_to_end);
+        let first_copy_end = self.w_pos + first_copy_len;
+        // preform the copy
+        self.buf[self.w_pos..first_copy_end].copy_from_slice(&bytes[..first_copy_len]);
+        // update the write position
+        self.w_pos += first_copy_len;
+        // check for wrapping
+        if self.w_pos == CAPACITY {
+            self.w_pos = 0;
         }
         // figure out if we have a second half to write
-        let second_copy_len = bytes_len - first_copy_len;
+        let second_copy_len = len - first_copy_len;
         if second_copy_len > 0 {
-            unsafe {
-                // preform the copy
-                core::slice::from_raw_parts_mut(self.start_ptr, second_copy_len)
-                    .copy_from_slice(&bytes[first_copy_len..]);
-
-                // update the write pointer
-                self.write_ptr = self.start_ptr.add(second_copy_len);
-            }
+            // preform the copy
+            self.buf[..second_copy_len].copy_from_slice(&bytes[first_copy_len..]);
+            // update the write position
+            self.w_pos += second_copy_len;
         }
+        // update length
+        self.len += len;
         // return
-        Ok(bytes_len)
+        Ok(len)
     }
 
     #[inline(always)]
@@ -167,46 +138,33 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
         if self.is_full() {
             return Err(BufferError::InsufficientSpace);
         }
-        // get the length
-        let bytes_len = bytes.len();
-        // get the free space
-        let free_space = self.free_space();
         // figure out how much we can write
-        let bytes_written = if bytes_len <= free_space {
-            bytes_len
-        } else {
-            free_space
-        };
-
-        // get the length from the write pointer to the end
-        let space_to_end = unsafe { self.end_ptr.offset_from(self.write_ptr) as usize };
+        let can_copy_len = min(bytes.len(), self.free_space());
+        // get the length from the write position to the end
+        let to_end_len = CAPACITY - self.w_pos;
         // figure out if we can copy the whole thing or just to the end of the buffer
-        let first_copy_len = core::cmp::min(bytes_written, space_to_end);
-        unsafe {
-            // preform the copy
-            core::slice::from_raw_parts_mut(self.write_ptr, first_copy_len)
-                .copy_from_slice(&bytes[..first_copy_len]);
-            // update the write pointer
-            self.write_ptr = self.write_ptr.add(first_copy_len);
-            // check for wrapping
-            if self.write_ptr == self.end_ptr {
-                self.write_ptr = self.start_ptr;
-            }
+        let first_copy_len = min(can_copy_len, to_end_len);
+        let first_copy_end = self.w_pos + first_copy_len;
+        // preform the copy
+        self.buf[self.w_pos..first_copy_end].copy_from_slice(&bytes[..first_copy_len]);
+        // update the write position
+        self.w_pos += first_copy_len;
+        // check for wrapping
+        if self.w_pos == CAPACITY {
+            self.w_pos = 0;
         }
         // figure out if we have a second half to write
-        let second_copy_len = bytes_written - first_copy_len;
+        let second_copy_len = can_copy_len - first_copy_len;
         if second_copy_len > 0 {
-            unsafe {
-                // preform the copy
-                core::slice::from_raw_parts_mut(self.start_ptr, second_copy_len)
-                    .copy_from_slice(&bytes[first_copy_len..]);
-
-                // update the write pointer
-                self.write_ptr = self.start_ptr.add(second_copy_len);
-            }
+            // preform the copy
+            self.buf[..second_copy_len].copy_from_slice(&bytes[first_copy_len..]);
+            // update the write position
+            self.w_pos += second_copy_len;
         }
+        // update length
+        self.len += can_copy_len;
         // return
-        Ok(bytes_written)
+        Ok(can_copy_len)
     }
 }
 

@@ -13,6 +13,7 @@ use embedded_io::{ErrorKind, ErrorType};
 use embedded_io_async::{Read, Write};
 
 use crate::{
+    BufferError,
     const_circular_buffer::ConstCircularBuffer,
     hal::{PD4, PD7, PG0, PG3, PG4, Pin},
 };
@@ -45,8 +46,6 @@ impl UsartReader<USART1, PG3, BUFFER_CAPACITY> {
     pub fn init(&mut self, cts_opt: Option<Pin<Output, PG3>>) {
         // set the cts pin option
         self.cts_opt = cts_opt;
-        // initialize the buffer
-        self.buffer.init();
         // enable rx interrupts
         unsafe {
             (*USART1::ptr())
@@ -80,6 +79,83 @@ fn USART1_RX() {
 
 // usart1 handle we can give out to operate on the static shared usart1 writer
 pub struct Usart1ReaderHandle;
+
+impl Usart1ReaderHandle {
+    pub async fn read_to(
+        &mut self,
+        term: u8,
+        buf: &mut [u8],
+    ) -> Result<usize, embedded_io::ErrorKind> {
+        let mut term_found = false;
+        let mut bytes_read = 0;
+        while !term_found {
+            match self.try_read_to(term, &mut buf[bytes_read..]).await {
+                Err(BufferError::PartialRead(n)) => {
+                    bytes_read += n;
+                }
+                Ok(n) => {
+                    bytes_read += n;
+                    term_found = true;
+                    break;
+                }
+                Err(e) => break,
+            }
+        }
+
+        if term_found {
+            Ok(bytes_read)
+        } else {
+            Err(ErrorKind::Other)
+        }
+    }
+
+    pub async fn try_read_to(&mut self, term: u8, buf: &mut [u8]) -> Result<usize, BufferError> {
+        // did we get called with an empty buffer
+        if buf.is_empty() {
+            return Err(BufferError::BufferEmpty);
+        }
+        // wait until we can read
+        if let Err(kind) = Usart1CanRead.await {
+            return Err(BufferError::BufferEmpty);
+        }
+        // initialize the number of bytes read
+        let mut bytes = 0;
+        let mut term_found = false;
+        // go interrupt free while we poll bytes
+        avr_device::interrupt::free(|cs| {
+            // get the reader
+            let mut reader = USART1_READER.borrow(cs).borrow_mut();
+            // walk the buffer
+            for slot in buf.iter_mut() {
+                // we know we can read at least one, from the data available await above
+                if let Ok(byte) = reader.buffer.read_byte() {
+                    *slot = byte;
+                    // increment the number of bytes read
+                    bytes += 1;
+                    // did we hit the terminator
+                    if byte == term {
+                        term_found = true;
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            // manage cts
+            if UsartReader::REASSERT_THRESHOLD < reader.buffer.free_space() {
+                reader.cts_opt.as_mut().map(|cts| cts.set_low());
+            }
+        });
+
+        if term_found {
+            Ok(bytes)
+        } else {
+            Err(BufferError::PartialRead(bytes))
+        }
+    }
+}
+
 impl ErrorType for Usart1ReaderHandle {
     type Error = embedded_io::ErrorKind;
 }
@@ -178,7 +254,6 @@ impl UsartWriter<USART1, PG4, BUFFER_CAPACITY> {
     }
     pub fn init(&mut self, rts_opt: Option<Pin<Input<Floating>, PG4>>) {
         self.rts_opt = rts_opt;
-        self.buffer.init();
     }
 }
 

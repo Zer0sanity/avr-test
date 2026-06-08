@@ -8,6 +8,7 @@ use crate::{BufferRequest, CircularBuffer, FlatBuffer};
 pub enum BufferError {
     BufferEmpty,
     InsufficientSpace,
+    PartialRead(usize),
 }
 
 impl From<BufferError> for embedded_io::ErrorKind {
@@ -15,6 +16,7 @@ impl From<BufferError> for embedded_io::ErrorKind {
         match err {
             BufferError::BufferEmpty => ErrorKind::WriteZero,
             BufferError::InsufficientSpace => ErrorKind::OutOfMemory,
+            BufferError::PartialRead(_) => ErrorKind::WriteZero,
         }
     }
 }
@@ -24,6 +26,7 @@ impl fmt::Display for BufferError {
         let txt = match self {
             BufferError::BufferEmpty => "BufferEmpty",
             BufferError::InsufficientSpace => "InsufficientSpace",
+            BufferError::PartialRead(_) => "PartialRead",
         };
         write!(f, "{}", txt)
     }

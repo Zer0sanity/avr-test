@@ -121,12 +121,12 @@ pub async fn usart1_reader_task<BUS, TXE, WR, SIWU>(
         // get the buffer as a mutable slice
         let rx_buffer = rx_buffer.as_mut();
         // preform a read
-        let bytes_read = reader.read(rx_buffer).await;
+        let bytes_read = reader.read_to(0x0a, rx_buffer).await;
         // see what happened
         match bytes_read {
             Ok(len) => {
-                _ = write!(tx_buffer, "len: {}\r\n", len);
-                // tx_buffer.write(&rx_buffer[0..len - 1]);
+                _ = tx_buffer.write(&rx_buffer[0..len - 1]);
+                _ = write!(tx_buffer, " len: {}\r\n", len);
             }
             Err(e) => {
                 _ = write!(tx_buffer, "error: {}\r\n", e);
