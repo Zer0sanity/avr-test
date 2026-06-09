@@ -65,14 +65,14 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
         }
         // read a byte
         let byte = self.buf[self.r_pos];
-        // update the length
-        self.len -= 1;
         // update the read position
         self.r_pos += 1;
         // check for wrapping
         if self.r_pos == CAPACITY {
             self.r_pos = 0;
         }
+        // update the length
+        self.len -= 1;
         // return the next byte
         Ok(byte)
     }
@@ -85,14 +85,14 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
         }
         // write the byte
         self.buf[self.w_pos] = byte;
-        // update the length
-        self.len += 1;
         // update the write position
         self.w_pos += 1;
         // check for wrapping
         if self.w_pos == CAPACITY {
             self.w_pos = 0;
         }
+        // update the length
+        self.len += 1;
         // everything is fine
         Ok(())
     }
@@ -132,7 +132,7 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
 
     #[inline(always)]
     pub fn write(&mut self, bytes: &[u8]) -> Result<usize> {
-        // first see if it will fit
+        // can we write any
         if self.is_full() {
             return Err(BufferError::InsufficientSpace);
         }

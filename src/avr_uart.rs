@@ -116,7 +116,7 @@ impl Usart1ReaderHandle {
         }
         // wait until we can read
         if let Err(kind) = Usart1CanRead.await {
-            return Err(BufferError::BufferEmpty);
+            return Err(kind.into()); //BufferError::From()BufferEmpty);
         }
         // initialize the number of bytes read
         let mut bytes = 0;

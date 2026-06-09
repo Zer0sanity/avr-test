@@ -21,6 +21,16 @@ impl From<BufferError> for embedded_io::ErrorKind {
     }
 }
 
+impl From<ErrorKind> for BufferError {
+    fn from(err: ErrorKind) -> Self {
+        match err {
+            ErrorKind::WriteZero => BufferError::BufferEmpty,
+            ErrorKind::OutOfMemory => BufferError::InsufficientSpace,
+            _ => BufferError::BufferEmpty,
+        }
+    }
+}
+
 impl fmt::Display for BufferError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let txt = match self {
@@ -65,7 +75,7 @@ impl From<BufferHandle> for CircularBuffer {
     }
 }
 
-impl From<BufferHandle> for FlatBuffer {
+impl From<BufferHandle> for FlatBuffer<'_> {
     fn from(handle: BufferHandle) -> Self {
         FlatBuffer::new(handle.ptr, handle.capacity)
     }

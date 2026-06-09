@@ -1,74 +1,78 @@
-use core::fmt::{self, Write};
+use core::{
+    cmp::min,
+    fmt::{self, Write},
+    slice,
+};
 
 use crate::BufferError;
 
 type Result<T> = core::result::Result<T, BufferError>;
 
 // because pointers can't be sent between threads safely
-unsafe impl Send for FlatBuffer {}
-unsafe impl Sync for FlatBuffer {}
+unsafe impl Send for FlatBuffer<'_> {}
+unsafe impl Sync for FlatBuffer<'_> {}
 
-pub struct FlatBuffer {
-    // pointer to the start of the buffer
-    start_ptr: *mut u8,
-    // pointer to the end of the buffer
-    end_ptr: *mut u8,
-    // buffer capacity
-    capacity: usize,
-    // read pointer
-    read_ptr: *mut u8,
-    // write pointer
-    write_ptr: *mut u8,
+pub struct FlatBuffer<'a> {
+    // read position
+    r_pos: usize,
+    // write position
+    w_pos: usize,
+    // tracked length
+    len: usize,
+    // reference to storage
+    buf: &'a mut [u8],
 }
 
-impl FlatBuffer {
+impl FlatBuffer<'_> {
     pub fn new(ptr: *mut u8, capacity: usize) -> Self {
         Self {
-            start_ptr: ptr,
-            end_ptr: unsafe { ptr.add(capacity as usize) },
-            capacity,
-            read_ptr: ptr,
-            write_ptr: ptr,
+            r_pos: 0,
+            w_pos: 0,
+            len: 0,
+            buf: unsafe { slice::from_raw_parts_mut(ptr, capacity) },
         }
     }
 
     #[inline(always)]
     pub fn len(&self) -> usize {
-        // get the offset between the read and write pointers
-        unsafe { self.write_ptr.offset_from(self.read_ptr) as usize }
+        self.len
     }
 
     #[inline(always)]
     pub fn free_space(&self) -> usize {
-        // space from end to write
-        unsafe { self.end_ptr.offset_from(self.write_ptr) as usize }
+        self.buf.len() - self.len
     }
 
     #[inline(always)]
     pub fn is_full(&self) -> bool {
-        // if free space is zero
-        self.free_space() == 0
+        self.len == self.buf.len()
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     #[inline(always)]
     pub fn reset(&mut self) -> usize {
-        // reset pointers to the start
-        self.read_ptr = self.start_ptr;
-        self.write_ptr = self.start_ptr;
-        // return the capacity
-        return self.capacity;
+        self.r_pos = 0;
+        self.w_pos = 0;
+        self.len = 0;
+        return self.buf.len();
     }
 
     #[inline(always)]
     pub fn read_byte(&mut self) -> Result<u8> {
         // is there anything to read
-        if self.read_ptr == self.write_ptr {
+        if self.is_empty() {
             return Err(BufferError::BufferEmpty);
         }
         // read a byte
-        let byte = unsafe { self.read_ptr.read_volatile() };
-        // update the read pointer
-        self.read_ptr = unsafe { self.read_ptr.add(1) };
+        let byte = self.buf[self.r_pos];
+        // update the read position
+        self.r_pos += 1;
+        // update the length
+        self.len -= 1;
         // return the next byte
         Ok(byte)
     }
@@ -76,38 +80,59 @@ impl FlatBuffer {
     #[inline(always)]
     pub fn write_byte(&mut self, byte: u8) -> Result<()> {
         // are we full
-        if self.write_ptr == self.end_ptr {
+        if self.is_full() {
             return Err(BufferError::InsufficientSpace);
         }
-        unsafe {
-            // write the byte
-            self.write_ptr.write_volatile(byte);
-            // update the write pointer
-            self.write_ptr = self.write_ptr.add(1)
-        };
-        // return the next slot
+        // write the byte
+        self.buf[self.w_pos] = byte;
+        // update the write position
+        self.w_pos += 1;
+        // update the length
+        self.len += 1;
+        // everything is fine
         Ok(())
     }
 
     #[inline(always)]
     pub fn write(&mut self, bytes: &[u8]) -> Result<usize> {
-        // get the length
+        // can we write any
+        if self.is_full() {
+            return Err(BufferError::InsufficientSpace);
+        }
+        // figure out how much we can write
+        let len = min(bytes.len(), self.free_space());
+        let end = self.w_pos + len;
+        // preform the copy
+        self.buf[self.w_pos..end].copy_from_slice(&bytes[..len]);
+        // update the write position
+        self.w_pos += len;
+        // update length
+        self.len += len;
+        // return
+        Ok(len)
+    }
+
+    #[inline(always)]
+    pub fn write_all(&mut self, bytes: &[u8]) -> Result<usize> {
+        // cache the length
         let len = bytes.len();
         // first see if it will fit
         if self.free_space() < len {
             return Err(BufferError::InsufficientSpace);
         }
+        let end = self.w_pos + len;
         // preform the copy
-        unsafe {
-            core::slice::from_raw_parts_mut(self.write_ptr, len).copy_from_slice(bytes);
-            self.write_ptr = self.write_ptr.add(len);
-        }
+        self.buf[self.w_pos..end].copy_from_slice(&bytes);
+        // update the write position
+        self.w_pos += len;
+        // update length
+        self.len += len;
         // return
         Ok(len)
     }
 }
 
-impl Write for FlatBuffer {
+impl Write for FlatBuffer<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         // just use the buffer handle write
         _ = self.write(s.as_bytes())?;
@@ -115,14 +140,14 @@ impl Write for FlatBuffer {
     }
 }
 
-impl AsRef<[u8]> for FlatBuffer {
+impl AsRef<[u8]> for FlatBuffer<'_> {
     fn as_ref(&self) -> &[u8] {
-        unsafe { core::slice::from_raw_parts(self.read_ptr, self.len()) }
+        &self.buf
     }
 }
 
-impl AsMut<[u8]> for FlatBuffer {
+impl AsMut<[u8]> for FlatBuffer<'_> {
     fn as_mut(&mut self) -> &mut [u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.write_ptr, self.free_space()) }
+        &mut self.buf
     }
 }
