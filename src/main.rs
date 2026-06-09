@@ -125,11 +125,13 @@ pub async fn usart1_reader_task<BUS, TXE, WR, SIWU>(
         // see what happened
         match bytes_read {
             Ok(len) => {
-                _ = tx_buffer.write(&rx_buffer[0..len - 1]);
-                _ = write!(tx_buffer, " len: {}\r\n", len);
+                let _ = tx_buffer.write(&rx_buffer.as_ref()[..len - 1]);
+                // let _ = write!(tx_buffer, " {}\r\n", len);
+                let l = len;
+                let _ = write!(tx_buffer, " {}", l);
             }
             Err(e) => {
-                _ = write!(tx_buffer, "error: {}\r\n", e);
+                _ = write!(tx_buffer, "error: {} \r\n", e);
             }
         };
         // write it

@@ -112,19 +112,17 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
         let first_copy_end = self.w_pos + first_copy_len;
         // preform the copy
         self.buf[self.w_pos..first_copy_end].copy_from_slice(&bytes[..first_copy_len]);
-        // update the write position
-        self.w_pos += first_copy_len;
-        // check for wrapping
-        if self.w_pos == CAPACITY {
-            self.w_pos = 0;
-        }
         // figure out if we have a second half to write
         let second_copy_len = len - first_copy_len;
         if second_copy_len > 0 {
             // preform the copy
             self.buf[..second_copy_len].copy_from_slice(&bytes[first_copy_len..]);
-            // update the write position
-            self.w_pos += second_copy_len;
+        }
+        // update the write position
+        self.w_pos += len;
+        // check for wrapping
+        if self.w_pos >= CAPACITY {
+            self.w_pos -= CAPACITY;
         }
         // update length
         self.len += len;
@@ -147,19 +145,17 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
         let first_copy_end = self.w_pos + first_copy_len;
         // preform the copy
         self.buf[self.w_pos..first_copy_end].copy_from_slice(&bytes[..first_copy_len]);
-        // update the write position
-        self.w_pos += first_copy_len;
-        // check for wrapping
-        if self.w_pos == CAPACITY {
-            self.w_pos = 0;
-        }
         // figure out if we have a second half to write
         let second_copy_len = can_copy_len - first_copy_len;
         if second_copy_len > 0 {
             // preform the copy
             self.buf[..second_copy_len].copy_from_slice(&bytes[first_copy_len..]);
-            // update the write position
-            self.w_pos += second_copy_len;
+        }
+        // update the write position
+        self.w_pos += can_copy_len;
+        // check for wrapping
+        if self.w_pos >= CAPACITY {
+            self.w_pos -= CAPACITY;
         }
         // update length
         self.len += can_copy_len;
