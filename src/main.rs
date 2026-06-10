@@ -124,19 +124,24 @@ pub async fn usart1_reader_task<BUS, TXE, WR, SIWU>(
         // see what happened
         match bytes_read {
             Ok(term_read) => {
-                tx_buffer.write(rx_buffer.as_ref());
-                if let Err(e) = core::write!(tx_buffer, "hi {:?}", rx_buffer.len()) {
-                    led.off();
-                } else {
-                    led.on();
-                }
+                tx_buffer.write(&rx_buffer.as_ref()[..rx_buffer.len() - 1]);
+                tx_buffer.write_byte(0x0d);
+                tx_buffer.write_byte(0x0a);
+
+                // if let Err(e)  core::write!(tx_buffer, "hi {:?}", rx_buffer.len()) {
+
+                // if let Err(e) = core::write!(tx_buffer, "hi {:?}", rx_buffer.len()) {
+                //     led.off();
+                // } else {
+                //     led.on();
+                // }
 
                 // let _ = tx_buffer.write(&rx_buffer[..len - 1]);
                 // _ = write!(tx_buffer, "bytes: {}\r\n", rx_buffer.len());
                 // let _ = write!(tx_buffer, "del {}", rx_buffer.len());
             }
             Err(e) => {
-                _ = write!(tx_buffer, "error: {} \r\n", e);
+                // _ = write!(tx_buffer, "error: {} \r\n", e);
             }
         };
         // write it
