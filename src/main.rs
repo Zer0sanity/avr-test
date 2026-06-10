@@ -2,12 +2,13 @@
 #![no_main]
 #![feature(abi_avr_interrupt)]
 // #![cfg_attr(target_arch = "avr", feature(asm_experimental_arch))]
-use core::{fmt::Write as fmtWrite, panic::PanicInfo};
+use core::{fmt::Write, panic::PanicInfo};
 
 use avr_device::at90can128;
 use avr_hal_generic::port::mode::{AnyInput, Input};
 use embedded_hal::digital::{InputPin, OutputPin};
-use embedded_io_async::{Read, Write};
+use embedded_io_async::{Read, Write as WriteAsync};
+
 use hal::Pins;
 pub mod async_queue;
 mod at90can128_hal;
@@ -99,7 +100,7 @@ fn main() -> ! {
 }
 
 pub async fn usart1_reader_task<BUS, TXE, WR, SIWU>(
-    mut reader: Usart1ReaderHandle,
+    reader: Usart1ReaderHandle,
     mut writer: Ft240xWriter<BUS, TXE, WR, SIWU>,
     mut led: LED,
 ) where
@@ -112,23 +113,27 @@ pub async fn usart1_reader_task<BUS, TXE, WR, SIWU>(
     let mut rx_buffer: FlatBuffer = BufferRequest.await.into();
     let mut tx_buffer: FlatBuffer = BufferRequest.await.into();
     // turn off the led
-    led.off();
+    led.on();
 
     loop {
-        // reset the buffers
         rx_buffer.reset();
         tx_buffer.reset();
-        // get the buffer as a mutable slice
-        let rx_buffer = rx_buffer.as_mut();
+
         // preform a read
-        let bytes_read = reader.read_to(0x0a, rx_buffer).await;
+        let bytes_read = reader.read_to(0x0a, &mut rx_buffer).await;
         // see what happened
         match bytes_read {
-            Ok(len) => {
-                let _ = tx_buffer.write(&rx_buffer.as_ref()[..len - 1]);
-                // let _ = write!(tx_buffer, " {}\r\n", len);
-                let l = len;
-                let _ = write!(tx_buffer, " {}", l);
+            Ok(term_read) => {
+                tx_buffer.write(rx_buffer.as_ref());
+                if let Err(e) = core::write!(tx_buffer, "hi {:?}", rx_buffer.len()) {
+                    led.off();
+                } else {
+                    led.on();
+                }
+
+                // let _ = tx_buffer.write(&rx_buffer[..len - 1]);
+                // _ = write!(tx_buffer, "bytes: {}\r\n", rx_buffer.len());
+                // let _ = write!(tx_buffer, "del {}", rx_buffer.len());
             }
             Err(e) => {
                 _ = write!(tx_buffer, "error: {} \r\n", e);
@@ -137,7 +142,7 @@ pub async fn usart1_reader_task<BUS, TXE, WR, SIWU>(
         // write it
         let _ = writer.write_all(tx_buffer.as_ref()).await;
         // blink the led on
-        led.toggle();
+        // led.toggle();
     }
 }
 

@@ -1,6 +1,6 @@
 use core::{
     cmp::min,
-    fmt::{self, Write},
+    fmt::{self, Error, Write},
     slice,
 };
 
@@ -122,7 +122,7 @@ impl FlatBuffer<'_> {
         }
         let end = self.w_pos + len;
         // preform the copy
-        self.buf[self.w_pos..end].copy_from_slice(&bytes);
+        self.buf[self.w_pos..end].copy_from_slice(bytes);
         // update the write position
         self.w_pos += len;
         // update length
@@ -132,22 +132,25 @@ impl FlatBuffer<'_> {
     }
 }
 
-impl Write for FlatBuffer<'_> {
+impl fmt::Write for FlatBuffer<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         // just use the buffer handle write
-        _ = self.write(s.as_bytes())?;
-        Ok(())
+        self.write_all(s.as_bytes())
+            .map(|_| ())
+            .map_err(|_| fmt::Error)
     }
 }
 
 impl AsRef<[u8]> for FlatBuffer<'_> {
     fn as_ref(&self) -> &[u8] {
-        &self.buf
+        let start = self.r_pos;
+        let end = start + self.len();
+        &self.buf[start..end]
     }
 }
 
 impl AsMut<[u8]> for FlatBuffer<'_> {
     fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.buf
+        &mut self.buf[self.w_pos..]
     }
 }

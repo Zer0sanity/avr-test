@@ -13,7 +13,7 @@ use embedded_io::{ErrorKind, ErrorType};
 use embedded_io_async::{Read, Write};
 
 use crate::{
-    BufferError,
+    BufferError, FlatBuffer,
     const_circular_buffer::ConstCircularBuffer,
     hal::{PD4, PD7, PG0, PG3, PG4, Pin},
 };
@@ -81,78 +81,64 @@ fn USART1_RX() {
 pub struct Usart1ReaderHandle;
 
 impl Usart1ReaderHandle {
-    pub async fn read_to(
-        &mut self,
-        term: u8,
-        buf: &mut [u8],
-    ) -> Result<usize, embedded_io::ErrorKind> {
-        let mut term_found = false;
-        let mut bytes_read = 0;
-        while !term_found {
-            match self.try_read_to(term, &mut buf[bytes_read..]).await {
-                Err(BufferError::PartialRead(n)) => {
-                    bytes_read += n;
-                }
-                Ok(n) => {
-                    bytes_read += n;
-                    term_found = true;
-                    break;
-                }
-                Err(e) => break,
+    pub async fn read_to(&self, term: u8, buf: &mut FlatBuffer<'_>) -> Result<bool, BufferError> {
+        loop {
+            match self.try_read_to(term, buf).await {
+                // haven't read terminator yet, continue
+                Ok(false) => continue,
+                // anything else we out
+                result => break result,
             }
-        }
-
-        if term_found {
-            Ok(bytes_read)
-        } else {
-            Err(ErrorKind::Other)
         }
     }
 
-    pub async fn try_read_to(&mut self, term: u8, buf: &mut [u8]) -> Result<usize, BufferError> {
-        // did we get called with an empty buffer
-        if buf.is_empty() {
+    pub async fn try_read_to(
+        &self,
+        term: u8,
+        buf: &mut FlatBuffer<'_>,
+    ) -> Result<bool, BufferError> {
+        // did we get called with a full buffer
+        if buf.is_full() {
             return Err(BufferError::BufferEmpty);
         }
         // wait until we can read
         if let Err(kind) = Usart1CanRead.await {
             return Err(kind.into()); //BufferError::From()BufferEmpty);
         }
-        // initialize the number of bytes read
-        let mut bytes = 0;
-        let mut term_found = false;
         // go interrupt free while we poll bytes
         avr_device::interrupt::free(|cs| {
             // get the reader
             let mut reader = USART1_READER.borrow(cs).borrow_mut();
             // walk the buffer
-            for slot in buf.iter_mut() {
-                // we know we can read at least one, from the data available await above
-                if let Ok(byte) = reader.buffer.read_byte() {
-                    *slot = byte;
-                    // increment the number of bytes read
-                    bytes += 1;
-                    // did we hit the terminator
-                    if byte == term {
-                        term_found = true;
-                        break;
-                    }
-                } else {
-                    break;
+            let result = loop {
+                // is the receiving buffer full
+                if buf.is_full() {
+                    break Err(BufferError::InsufficientSpace);
                 }
-            }
-
+                // try to read from the usart receive buffer
+                match reader.buffer.read_byte() {
+                    // we got a byte
+                    Ok(byte) => {
+                        // write it to the receive buffer, we can discard the result since we checked above
+                        _ = buf.write_byte(byte);
+                        // did we catch the terminator
+                        if byte == term {
+                            break Ok(true);
+                        }
+                    }
+                    // no byte to read in usart receive buffer
+                    Err(BufferError::BufferEmpty) => break Ok(false),
+                    // any other error we out
+                    Err(e) => break Err(e),
+                }
+            };
             // manage cts
             if UsartReader::REASSERT_THRESHOLD < reader.buffer.free_space() {
                 reader.cts_opt.as_mut().map(|cts| cts.set_low());
             }
-        });
-
-        if term_found {
-            Ok(bytes)
-        } else {
-            Err(BufferError::PartialRead(bytes))
-        }
+            // return the result
+            result
+        })
     }
 }
 
