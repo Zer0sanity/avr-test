@@ -2,12 +2,12 @@
 #![no_main]
 #![feature(abi_avr_interrupt)]
 // #![cfg_attr(target_arch = "avr", feature(asm_experimental_arch))]
-use core::{fmt::Write, panic::PanicInfo};
-
 use avr_device::at90can128;
 use avr_hal_generic::port::mode::{AnyInput, Input};
+use core::fmt::Write as _;
+use core::panic::PanicInfo;
 use embedded_hal::digital::{InputPin, OutputPin};
-use embedded_io_async::{Read, Write as WriteAsync};
+use embedded_io_async::{Read as _, Write as _};
 
 use hal::Pins;
 pub mod async_queue;
@@ -123,10 +123,10 @@ pub async fn usart1_reader_task<BUS, TXE, WR, SIWU>(
         let bytes_read = reader.read_to(0x0a, &mut rx_buffer).await;
         // see what happened
         match bytes_read {
-            Ok(term_read) => {
-                tx_buffer.write(&rx_buffer.as_ref()[..rx_buffer.len() - 1]);
-                tx_buffer.write_byte(0x0d);
-                tx_buffer.write_byte(0x0a);
+            Ok(_) => {
+                let _ = tx_buffer.write(&rx_buffer.as_ref()[..rx_buffer.len() - 1]);
+                let _ = tx_buffer.write_byte(0x0d);
+                let _ = tx_buffer.write_byte(0x0a);
 
                 // if let Err(e)  core::write!(tx_buffer, "hi {:?}", rx_buffer.len()) {
 
@@ -138,9 +138,9 @@ pub async fn usart1_reader_task<BUS, TXE, WR, SIWU>(
 
                 // let _ = tx_buffer.write(&rx_buffer[..len - 1]);
                 // _ = write!(tx_buffer, "bytes: {}\r\n", rx_buffer.len());
-                // let _ = write!(tx_buffer, "del {}", rx_buffer.len());
+                let _ = write!(tx_buffer, "del {}", rx_buffer.len());
             }
-            Err(e) => {
+            Err(_) => {
                 // _ = write!(tx_buffer, "error: {} \r\n", e);
             }
         };

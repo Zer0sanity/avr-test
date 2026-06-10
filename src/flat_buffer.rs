@@ -1,8 +1,4 @@
-use core::{
-    cmp::min,
-    fmt::{self, Error, Write},
-    slice,
-};
+use core::{cmp::min, fmt, slice};
 
 use crate::BufferError;
 
@@ -137,7 +133,7 @@ impl fmt::Write for FlatBuffer<'_> {
         // just use the buffer handle write
         self.write_all(s.as_bytes())
             .map(|_| ())
-            .map_err(|_| fmt::Error)
+            .map_err(|_| fmt::Error::default())
     }
 }
 
