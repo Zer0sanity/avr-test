@@ -10,7 +10,7 @@ use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_io::{ErrorKind, ErrorType};
 use embedded_io_async::{Read, Write};
 
-use crate::{ft240x::io_bus_8::IoBus8, interrupts::At90Can128Interrupts};
+use crate::{BufferError, FlatBuffer, ft240x::io_bus_8::IoBus8, interrupts::At90Can128Interrupts};
 
 // global waker for transmitting and receiving
 pub static TX_WAKER: Mutex<RefCell<Option<Waker>>> = Mutex::new(RefCell::new(None));
@@ -118,6 +118,72 @@ where
 
     pub fn data_available(&mut self) -> DataAvailableFuture<'_, BUS, RXF, RD> {
         DataAvailableFuture { reader: self }
+    }
+
+    pub async fn read_to(
+        &mut self,
+        term: u8,
+        buf: &mut FlatBuffer<'_>,
+    ) -> Result<bool, BufferError> {
+        loop {
+            match self.try_read_to(term, buf).await {
+                // haven't read terminator yet, continue
+                Ok(false) => continue,
+                // anything else we out
+                result => break result,
+            }
+        }
+    }
+
+    pub async fn try_read_to(
+        &mut self,
+        term: u8,
+        buf: &mut FlatBuffer<'_>,
+    ) -> Result<bool, BufferError> {
+        // did we get called with a full buffer
+        if buf.is_full() {
+            return Err(BufferError::BufferEmpty);
+        }
+        // wait until we can read
+        if let Err(kind) = self.data_available().await {
+            return Err(kind.into());
+        }
+
+        // we know we can read at least one, from the rts await above
+        let byte = self.read_byte();
+        // write it to the receive buffer, we can discard the result since we checked above
+        _ = buf.write_byte(byte);
+        // did we catch the terminator
+        // if byte == term {
+        return Ok(true);
+
+        // walk the buffer
+        let result = loop {
+            // is the receiving buffer full
+            if buf.is_full() {
+                break Err(BufferError::InsufficientSpace);
+            }
+            // we know we can read at least one, from the rts await above
+            let byte = self.read_byte();
+            // write it to the receive buffer, we can discard the result since we checked above
+            _ = buf.write_byte(byte);
+            // did we catch the terminator
+            // if byte == term {
+            break Ok(true);
+            // }
+
+            // make sure were connected
+            if !self.bus.is_connected() {
+                // this should be something different
+                break Err(BufferError::InsufficientSpace);
+            }
+            // make sure the ft240x has something to read
+            if !self.can_read() {
+                break Ok(false);
+            }
+        };
+        // return the result
+        result
     }
 }
 

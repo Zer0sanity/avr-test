@@ -4,10 +4,6 @@ use crate::BufferError;
 
 type Result<T> = core::result::Result<T, BufferError>;
 
-// because pointers can't be sent between threads safely
-unsafe impl Send for FlatBuffer<'_> {}
-unsafe impl Sync for FlatBuffer<'_> {}
-
 pub struct FlatBuffer<'a> {
     // read position
     r_pos: usize,
@@ -118,7 +114,7 @@ impl FlatBuffer<'_> {
         }
         let end = self.w_pos + len;
         // preform the copy
-        self.buf[self.w_pos..end].copy_from_slice(bytes);
+        self.buf[self.w_pos..end].copy_from_slice(&bytes[..len]);
         // update the write position
         self.w_pos += len;
         // update length

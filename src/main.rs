@@ -62,7 +62,7 @@ fn main() -> ! {
 
     // network uart (maybe make these more generic and just pass downgraded inputs/outputs and let driver configure)
     // also the sense/reset/defaults are specific to xpico so maybe don't include in uart
-    let (ethernet_reader, _ethernet_writer) =
+    let (ethernet_reader, ethernet_writer) =
         AvrUart::init(dp.USART1, pins.pg3, pins.pg4, pins.pd7, pins.pd4, pins.pg0);
 
     // ft240
@@ -84,7 +84,7 @@ fn main() -> ! {
     Timer::init(&dp.TC1);
 
     let combined_future = Join {
-        a: ft240_reader_task(reader, err_led),
+        a: ft240_reader_task(reader, ethernet_writer, err_led),
         b: usart1_reader_task(ethernet_reader, usb_writer, can_led),
     };
 
@@ -115,30 +115,22 @@ pub async fn usart1_reader_task<BUS, TXE, WR, SIWU>(
     // turn off the led
     led.on();
 
+    let _ = writer.write_all("hi".as_bytes()).await;
+
     loop {
         rx_buffer.reset();
         tx_buffer.reset();
 
         // preform a read
-        let bytes_read = reader.read_to(0x0a, &mut rx_buffer).await;
+        let packet_received = reader.read_to(0x0a, &mut rx_buffer).await;
+        let len = rx_buffer.len();
         // see what happened
-        match bytes_read {
+        match packet_received {
             Ok(_) => {
-                let _ = tx_buffer.write(&rx_buffer.as_ref()[..rx_buffer.len() - 1]);
-                let _ = tx_buffer.write_byte(0x0d);
-                let _ = tx_buffer.write_byte(0x0a);
-
-                // if let Err(e)  core::write!(tx_buffer, "hi {:?}", rx_buffer.len()) {
-
-                // if let Err(e) = core::write!(tx_buffer, "hi {:?}", rx_buffer.len()) {
-                //     led.off();
-                // } else {
-                //     led.on();
-                // }
-
-                // let _ = tx_buffer.write(&rx_buffer[..len - 1]);
-                // _ = write!(tx_buffer, "bytes: {}\r\n", rx_buffer.len());
-                let _ = write!(tx_buffer, "del {}", rx_buffer.len());
+                let _ = tx_buffer.write_all(&rx_buffer.as_ref()[..rx_buffer.len() - 1]);
+                let _ = tx_buffer.write_str(" bytes: ");
+                let _ = tx_buffer.write_byte(len as u8 + 0x30);
+                let _ = tx_buffer.write_str("\r\n");
             }
             Err(_) => {
                 // _ = write!(tx_buffer, "error: {} \r\n", e);
@@ -147,31 +139,55 @@ pub async fn usart1_reader_task<BUS, TXE, WR, SIWU>(
         // write it
         let _ = writer.write_all(tx_buffer.as_ref()).await;
         // blink the led on
-        // led.toggle();
+        led.toggle();
     }
 }
 
-pub async fn ft240_reader_task<BUS, RXF, RD>(mut reader: Ft240xReader<BUS, RXF, RD>, mut led: LED)
-where
+pub async fn ft240_reader_task<BUS, RXF, RD>(
+    mut reader: Ft240xReader<BUS, RXF, RD>,
+    mut writer: Usart1WriterHandle,
+    mut led: LED,
+) where
     BUS: IoBus8,
     RXF: InputPin<Error = core::convert::Infallible>,
     RD: OutputPin<Error = core::convert::Infallible>,
 {
-    // let mut counter: u16 = 0;
-
-    let mut buffer: FlatBuffer = BufferRequest.await.into();
+    // get some buffers
+    let mut rx_buffer: FlatBuffer = BufferRequest.await.into();
+    let mut tx_buffer: FlatBuffer = BufferRequest.await.into();
+    // turn off the led
+    led.on();
 
     loop {
-        // turn off the led
-        led.off();
-        // reset the read buffer
-        buffer.reset();
-        // get the buffer as a mutable slice
-        let rx_buffer = buffer.as_mut();
+        rx_buffer.reset();
+        tx_buffer.reset();
+
         // preform a read
-        let _ = reader.read(rx_buffer).await;
+        let packet_received = reader.read_to(0x0a, &mut rx_buffer).await;
+        // let packet_received = reader.read(0x0a, &mut rx_buffer).await;
+        // get the buffer as a mutable slice
+        // let rx_buffer1 = rx_buffer.as_mut();
+        // preform a read
+        // let mut fuck: [u8; 30] = [0; 30];
+        // let rx_result = reader.read(&mut fuck).await;
+        // see what happened
+        led.toggle();
+        match packet_received {
+            Ok(_) => {
+                let _ = tx_buffer.write_all(rx_buffer.as_ref());
+                let _ = tx_buffer.write_str(" bytes: ");
+                let _ = tx_buffer.write_byte(rx_buffer.len() as u8 + 0x30);
+                let _ = tx_buffer.write_str("\r\n");
+            }
+            Err(_) => {
+                // _ = write!(tx_buffer, "error: {} \r\n", e);
+            }
+        };
+        // write it
+        let _ = writer.write_all(tx_buffer.as_ref()).await;
+        let _ = writer.flush().await;
         // blink the led on
-        led.on();
+        led.toggle();
     }
 }
 
