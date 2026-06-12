@@ -2,10 +2,14 @@ pub mod io_bus_8;
 
 use core::{
     cell::RefCell,
+    marker::PhantomData,
     task::{Context, Poll, Waker},
 };
 
-use avr_device::interrupt::Mutex;
+use avr_device::{
+    at90can128::{self, EXINT, PORTC},
+    interrupt::Mutex,
+};
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_io::{ErrorKind, ErrorType};
 use embedded_io_async::{Read, Write};
@@ -16,74 +20,191 @@ use crate::{BufferError, FlatBuffer, ft240x::io_bus_8::IoBus8, interrupts::At90C
 pub static TX_WAKER: Mutex<RefCell<Option<Waker>>> = Mutex::new(RefCell::new(None));
 pub static RX_WAKER: Mutex<RefCell<Option<Waker>>> = Mutex::new(RefCell::new(None));
 
+#[derive(Clone, Copy, PartialEq)]
+enum BusState {
+    Unknown,
+    Input,
+    Output,
+}
+
 // base struct for ft240x
-pub struct Ft240x<BUS, RXF, TXE, RD, WR, SIWU> {
-    bus: BUS,   // port used write/read from FT240
-    rxf: RXF,   // input to tell when data can be read from the FT240.
-    txe: TXE,   // input to tell when the FT240 can accept data.
-    rd: RD,     // output to have the FT240 put a received byte from its FIFO to the data bus
-    wr: WR,     // output to have the FT240 read data byte from data bus to its transmit FIFO
-    siwu: SIWU, // output to tell the FT240 to flush its transmit FIFO buffer to the PC
+pub struct Ft240x<BUS, SENSE, RXF, TXE, RD, WR, SIWU> {
+    bus: BUS,                           // port used write/read from FT240
+    sense: Pin<Input<Floating>, SENSE>, // input to tell if usb is connected to host
+    rxf: Pin<Input<Floating>, RXF>,     // input to tell when data can be read from the FT240.
+    txe: Pin<Input<Floating>, TXE>,     // input to tell when the FT240 can accept data.
+    rd: Pin<Output, RD>, // output to have the FT240 put a received byte from its FIFO to the data bus
+    wr: Pin<Output, WR>, // output to have the FT240 read data byte from data bus to its transmit FIFO
+    siwu: Pin<Output, SIWU>, // output to tell the FT240 to flush its transmit FIFO buffer to the PC
+    state: BusState,
+}
+
+impl Ft240x<PORTC, PG2, PE6, PE5, PE4, PE7, PE2> {
+    pub fn new(
+        bus: PORTC,
+        sense: Pin<Input<Floating>, PG2>,
+        rxf: Pin<Input<Floating>, PE6>,
+        txe: Pin<Input<Floating>, PE5>,
+        rd: Pin<Input<Floating>, PE4>,
+        wr: Pin<Input<Floating>, PE7>,
+        siwu: Pin<Input<Floating>, PE2>,
+    ) -> Self {
+        // configure output pins
+        let rd = pins.pe4.into_output().downgrade();
+        let wr = pins.pe7.into_output().downgrade();
+        let siwu = pins.pe2.into_output().downgrade();
+
+        Self {
+            bus,
+            sense,
+            rxf,
+            txe,
+            rd,
+            wr,
+            siwu,
+            state: BusState::Unknown,
+        }
+    }
+
+    #[inline(always)]
+    fn is_connected(&mut self) -> bool {
+        self.sense.is_high()
+    }
+
+    #[inline(always)]
+    pub fn can_read(&mut self) -> bool {
+        self.rxf.is_low()
+    }
+
+    #[inline(always)]
+    pub fn can_write(&mut self) -> bool {
+        self.txe.is_low()
+    }
+
+    // This sub will preform the required operation to read a byte to the FT240.
+    // NOTE:  This sub is not thread safe and should be called with interrupts disabled if interrupts are being used.
+    // TODO: HOT make this one inline assembly block
+    #[inline(always)]
+    pub fn read_byte(&mut self) -> u8 {
+        // set the bus to an input
+        if self.state != State::Input {
+            // 0x00 sets all 8 pins to high-impedance input
+            self.bus.ddrc().write(|w| unsafe { w.bits(0x00) });
+            // 0x00 disable pull-ups
+            self.bus.port.portc().write(|w| w.bits(0x00));
+            // update the state
+            self.state = State::Input;
+        }
+        // pull the RD line low so the FT240 will present a received byte from its FIFO to the data bus
+        self.rd.set_low();
+        // preform a nop to allow time for the data bus port to stabilize and the FT240 to present the data
+        avr_device::asm::nop();
+        // read the data
+        let data = self.bus.pinc().read().bits();
+        // release the RD line since we are done with the operation
+        self.rd.set_high();
+        data
+    }
+
+    // This sub will preform the required operation to transmit a byte to the FT240.
+    // NOTE:  This sub is not thread safe and should be called with interrupts disabled if interrupts are being used.
+    // TODO: HOT make this one inline assembly block
+    #[inline(always)]
+    pub fn write_byte(&mut self, data: u8) {
+        // set the bus to an output
+        if self.state != State::Output {
+            // DDRC register controls pin direction (0xFF sets all 8 pins to output)
+            self.bus.ddrc().write(|w| unsafe { w.bits(0xFF) });
+            // update the state
+            self.state = State::Output;
+        }
+
+        // put the data onto the pins
+        self.bus.portc().write(|w| unsafe { w.bits(byte) });
+        // pull the WR line low so FT240 will sample the data bus and store it to its FIFO
+        self.wr.set_low();
+        // preform a nop to allow time for the FT240 to sample the data bus
+        avr_device::asm::nop();
+        // release the WR line since we are done with the operation
+        self.wr.set_high();
+    }
+
+    // pulses the SIWU(Send Immediate/PC Wake-up) line to flush the FT240s Tx FIFO to the host
+    #[inline(always)]
+    pub fn flush(&mut self) {
+        //pull the SIWU pin low
+        self.siwu.set_low();
+        // preform a nop to allow time to sense the logic level change
+        avr_device::asm::nop2();
+        //pull the SIWU back up
+        self.siwu.set_high();
+    }
 }
 
 // reader for ft240x
-pub struct Ft240xReader<BUS, RXF, RD> {
-    bus: BUS,
-    rxf: RXF,
-    rd: RD,
+pub struct Ft240xReader<BUS, const BUFFER_CAPACITY: usize> {
+    _bus: PhantomData<BUS>,
+    buffer: ConstCircularBuffer<BUFFER_CAPACITY>,
+    waker: Option<Waker>,
+    reciver_idle: bool,
 }
 
-// writer for ft240x
-pub struct Ft240xWriter<BUS, TXE, WR, SIWU> {
-    bus: BUS,
-    txe: TXE,
-    wr: WR,
-    siwu: SIWU,
-}
-
-impl<BUS, RXF, TXE, RD, WR, SIWU> Ft240x<BUS, RXF, TXE, RD, WR, SIWU>
-where
-    BUS: IoBus8,
-    RXF: InputPin<Error = core::convert::Infallible>,
-    TXE: InputPin<Error = core::convert::Infallible>,
-    RD: OutputPin<Error = core::convert::Infallible>,
-    WR: OutputPin<Error = core::convert::Infallible>,
-    SIWU: OutputPin<Error = core::convert::Infallible>,
-{
-    #[rustfmt::skip]
-    pub fn new(mut bus: BUS, rxf: RXF, txe: TXE, mut rd: RD, mut wr: WR, mut siwu: SIWU) -> Self {
-        // initialize the bus as high-impedance (Input + Pull-up)
-        let _ = bus.set_as_input();
-        let _ = bus.write(0xff);
-        // prepare initial states: active-low pins should start High (Off)
-        let _ = rd.set_high();
-        let _ = wr.set_high();
-        let _ = siwu.set_high();
-        // setup the interrupts
-        At90Can128Interrupts::rxf_int_setup();
-        At90Can128Interrupts::txe_int_setup();
-        // initialize the structure
-        Self { bus, rxf, txe, rd, wr, siwu}
+impl Ft240xReader<PORTC, BUFFER_CAPACITY> {
+    const RX_EXT_INT6: u8 = 1 << 6;
+    pub const fn new() -> Self {
+        Self {
+            _bus: PhantomData,
+            buffer: ConstCircularBuffer::new(),
+            waker: None,
+            reciver_idle: true,
+        }
     }
 
-    // consume self and split up ports
-    pub fn split(self) -> (Ft240xReader<BUS, RXF, RD>, Ft240xWriter<BUS, TXE, WR, SIWU>) {
-        let reader = Ft240xReader {
-            bus: self.bus.replicate(),
-            rxf: self.rxf,
-            rd: self.rd,
-        };
+    pub fn init(&self) {
+        unsafe {
+            // setup RXF(PE6/INT6) to trigger on falling edges
+            (*EXINT::ptr())
+                .eicrb()
+                .modify(|_, w| w.isc6().falling_edge_of_intx());
+            // clear the INT6 interrupt flag by writing it to 1
+            (*EXINT::ptr())
+                .eifr()
+                .write(|w| w.intf().bits(Self::RX_EXT_INT6));
+        }
+    }
 
-        let writer = Ft240xWriter {
-            bus: self.bus,
-            txe: self.txe,
-            wr: self.wr,
-            siwu: self.siwu,
-        };
+    // disable receive interrupts
+    #[inline(always)]
+    pub fn rxf_int_disable() {
+        unsafe {
+            // disable interrupts
+            (*EXINT::ptr())
+                .eimsk()
+                .modify(|r, w| w.int().bits(r.int().bits() & !Self::RX_EXT_INT6));
+            // clear the interrupt flag
+            (*EXINT::ptr())
+                .eifr()
+                .write(|w| w.intf().bits(Self::RX_EXT_INT6));
+        }
+    }
 
-        (reader, writer)
+    // enable receive interrupts
+    #[inline(always)]
+    pub fn rxf_int_enable() {
+        unsafe {
+            // clear the interrupt flag
+            (*EXINT::ptr())
+                .eifr()
+                .write(|w| w.intf().bits(Self::RX_EXT_INT6));
+            // enable interrupts
+            (*EXINT::ptr())
+                .eimsk()
+                .eodify(|r, w| w.int().bits(r.int().bits() | Self::RX_EXT_INT6));
+        }
     }
 }
+
+pub struct Ft240xReaderHandle;
 
 impl<BUS, RXF, RD> Ft240xReader<BUS, RXF, RD>
 where
@@ -95,25 +216,6 @@ where
     #[inline(always)]
     pub fn can_read(&mut self) -> bool {
         self.rxf.is_low().unwrap_or(false)
-    }
-
-    // This sub will preform the required operation to read a byte to the FT240.
-    // NOTE:  This sub is not thread safe and should be called with interrupts disabled if interrupts are being used.
-    // TODO: HOT make this one inline assembly block
-    #[inline(always)]
-    pub fn read_byte(&mut self) -> u8 {
-        // set the bus to an input
-        let _ = self.bus.set_as_input();
-        // pull the RD line low so the FT240 will present a received byte from its FIFO to the data bus
-        let _ = self.rd.set_low();
-        // preform a nop to allow time for the data bus port to stabilize and the FT240 to present the data
-        avr_device::asm::nop();
-        // read the data
-        let data = self.bus.read().unwrap_or(0);
-        // release the RD line since we are done with the operation
-        let _ = self.rd.set_high();
-        // re-enable the pull-ups
-        data
     }
 
     pub fn data_available(&mut self) -> DataAvailableFuture<'_, BUS, RXF, RD> {
@@ -270,6 +372,96 @@ where
         // here we read at least one so, return the number of bytes read
         Ok(bytes)
     }
+}
+
+// writer for ft240x
+pub struct Ft240xWriter<BUS, const BUFFER_CAPACITY: usize> {
+    _bus: PhantomData<BUS>,
+    buffer: ConstCircularBuffer<BUFFER_CAPACITY>,
+    waker: Option<Waker>,
+    transceiver_idle: bool,
+}
+
+impl Ft240xWriter<PORTC, BUFFER_CAPACITY> {
+    const TX_EXT_INT5: u8 = 1 << 5;
+
+    pub const fn new() -> Self {
+        Self {
+            _bus: PhantomData,
+            buffer: ConstCircularBuffer::new(),
+            waker: None,
+            transceiver_idle: true,
+        }
+    }
+
+    pub fn init(&self) {
+        unsafe {
+            // setup TXE(PE5/INT5) to trigger on falling edges
+            (*EXINT::ptr())
+                .eicrb()
+                .modify(|_, w| w.isc5().falling_edge_of_intx());
+            // clear the INT5 interrupt flags by writing it to 1
+            (*EXINT::ptr())
+                .eifr()
+                .write(|w| unsafe { w.intf().bits(Self::TX_EXT_INT5) });
+        }
+    }
+
+    // enable transmit interrupts
+    #[inline(always)]
+    pub fn txe_int_enable() {
+        unsafe {
+            // clear the INT5 interrupt flags by writing it to 1
+            (*EXINT::ptr())
+                .eifr()
+                .write(|w| w.intf().bits(Self::TX_EXT_INT5));
+            // enable interrupts so we get interrupted when the FT240 can accept the next byte
+            (*EXINT::ptr())
+                .eimsk()
+                .modify(|r, w| w.int().bits(r.int().bits() | Self::TX_EXT_INT5));
+        }
+    }
+
+    // disable transmit interrupts
+    #[inline(always)]
+    pub fn txe_int_disable() {
+        unsafe {
+            // disable interrupts
+            (*EXINT::ptr())
+                .eimsk()
+                .modify(|r, w| w.int().bits(r.int().bits() & !Self::TX_EXT_INT5));
+            // clear the interrupt flag
+            (*EXINT::ptr())
+                .eifr()
+                .write(|w| w.intf().bits(Self::TX_EXT_INT5));
+        }
+    }
+}
+
+//USB tx interrupt.  all this is doing is waking the waker and disabling interrupts
+#[avr_device::interrupt(at90can128)]
+fn INT5() {
+    // forge a token. This is safe ONLY because we are in an ISR.
+    let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
+    // take and wake the waker
+    if let Some(waker) = TX_WAKER.borrow(cs).borrow_mut().take() {
+        waker.wake();
+    }
+    // disable the interrupt
+    At90Can128Interrupts::txe_int_disable();
+}
+
+//USB Rx Interrupt.  all this is doing is waking the waker and disabling interrupts
+#[avr_device::interrupt(at90can128)]
+fn INT6() {
+    // forge a token. This is safe ONLY because we are in an ISR.
+    let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
+    // take and wake the waker
+    if let Some(waker) = RX_WAKER.borrow(cs).borrow_mut().take() {
+        waker.wake();
+    }
+    // disable the interrupt
+    At90Can128Interrupts::rxf_int_disable();
 }
 
 impl<BUS, TXE, WR, SIWU> Ft240xWriter<BUS, TXE, WR, SIWU>

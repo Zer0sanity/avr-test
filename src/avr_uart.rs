@@ -437,23 +437,9 @@ static USART1_CONTROL: Mutex<RefCell<UsartControlSignals<PD7, PD4, PG0>>> =
     Mutex::new(RefCell::new(UsartControlSignals::new()));
 
 // base struct for ft240x
-pub struct AvrUart<USART, CTS, RTS, SENSE, RESET, DEFAULTS>
-where
-    CTS: PinOps,
-    RTS: PinOps,
-    SENSE: PinOps,
-    RESET: PinOps,
-    DEFAULTS: PinOps,
-{
-    usart: USART,
-    cts: Pin<Output, CTS>,
-    rts: Pin<Input<Floating>, RTS>,
-    sense: Pin<Input<PullUp>, SENSE>,
-    reset: Pin<Output, RESET>,
-    defaults: Pin<Output, DEFAULTS>,
-}
+pub struct AvrUart;
 
-impl AvrUart<USART1, PG3, PG4, PD7, PD4, PG0> {
+impl AvrUart {
     pub fn init(
         usart: at90can128::USART1,
         cts: Pin<Input<Floating>, PG3>,
