@@ -3,15 +3,12 @@
 #![feature(abi_avr_interrupt)]
 // #![cfg_attr(target_arch = "avr", feature(asm_experimental_arch))]
 use avr_device::at90can128;
-use avr_hal_generic::port::mode::{AnyInput, Input};
 use core::fmt::Write as _;
 use core::panic::PanicInfo;
-use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_io_async::{Read as _, Write as _};
 
 use hal::Pins;
 pub mod async_queue;
-mod at90can128_hal;
 pub mod buffer_handle;
 pub mod buffer_pool;
 pub mod circular_buffer;
@@ -20,7 +17,6 @@ pub mod executor;
 pub mod flat_buffer;
 mod ft240x;
 pub mod hal;
-mod interrupts;
 pub mod led;
 pub mod timer;
 // pub mod usb_ft240;
@@ -40,13 +36,7 @@ pub use timer::*;
 pub use avr_uart::*;
 pub use wait_pin_state::*;
 
-use crate::{
-    at90can128_hal::avr_port::{BusHandle, StaticBus},
-    ft240x::{Ft240x, Ft240xReader, Ft240xWriter, io_bus_8::IoBus8},
-    hal::{Dynamic, Pin},
-};
-
-static USB_BUS: StaticBus<at90can128::PORTC, Pin<Input<AnyInput>, Dynamic>> = StaticBus::empty();
+use crate::ft240x::{Ft240x, Ft240xReaderHandle, Ft240xWriterHandle};
 
 #[avr_device::entry]
 fn main() -> ! {
@@ -65,26 +55,15 @@ fn main() -> ! {
     let (ethernet_reader, ethernet_writer) =
         AvrUart::init(dp.USART1, pins.pg3, pins.pg4, pins.pd7, pins.pd4, pins.pg0);
 
-    // ft240
-    let io_bus = BusHandle::init(
-        dp.PORTC,
-        pins.pg2.into_floating_input().downgrade().forget_imode(),
-        &USB_BUS,
-    );
-    let rxf = pins.pe6.into_floating_input().downgrade().forget_imode();
-    let txe = pins.pe5.into_floating_input().downgrade().forget_imode();
-    let rd = pins.pe4.into_output().downgrade();
-    let wr = pins.pe7.into_output().downgrade();
-    let siwu = pins.pe2.into_output().downgrade();
     // initialize usb
-    let ft240 = Ft240x::new(io_bus, rxf, txe, rd, wr, siwu);
-    // split it
-    let (reader, usb_writer) = ft240.split();
+    let (usb_reader, usb_writer) = Ft240x::init(
+        dp.PORTC, pins.pg2, pins.pe4, pins.pe7, pins.pe2, pins.pe6, pins.pe5,
+    );
 
     Timer::init(&dp.TC1);
 
     let combined_future = Join {
-        a: ft240_reader_task(reader, ethernet_writer, err_led),
+        a: ft240_reader_task(usb_reader, ethernet_writer, err_led),
         b: usart1_reader_task(ethernet_reader, usb_writer, can_led),
     };
 
@@ -99,16 +78,11 @@ fn main() -> ! {
     loop {}
 }
 
-pub async fn usart1_reader_task<BUS, TXE, WR, SIWU>(
+pub async fn usart1_reader_task(
     reader: Usart1ReaderHandle,
-    mut writer: Ft240xWriter<BUS, TXE, WR, SIWU>,
+    mut writer: Ft240xWriterHandle,
     mut led: LED,
-) where
-    BUS: IoBus8,
-    TXE: InputPin<Error = core::convert::Infallible>,
-    WR: OutputPin<Error = core::convert::Infallible>,
-    SIWU: OutputPin<Error = core::convert::Infallible>,
-{
+) {
     // get some buffers
     let mut rx_buffer: FlatBuffer = BufferRequest.await.into();
     let mut tx_buffer: FlatBuffer = BufferRequest.await.into();
@@ -143,15 +117,11 @@ pub async fn usart1_reader_task<BUS, TXE, WR, SIWU>(
     }
 }
 
-pub async fn ft240_reader_task<BUS, RXF, RD>(
-    mut reader: Ft240xReader<BUS, RXF, RD>,
+pub async fn ft240_reader_task(
+    mut reader: Ft240xReaderHandle,
     mut writer: Usart1WriterHandle,
     mut led: LED,
-) where
-    BUS: IoBus8,
-    RXF: InputPin<Error = core::convert::Infallible>,
-    RD: OutputPin<Error = core::convert::Infallible>,
-{
+) {
     // get some buffers
     let mut rx_buffer: FlatBuffer = BufferRequest.await.into();
     let mut tx_buffer: FlatBuffer = BufferRequest.await.into();

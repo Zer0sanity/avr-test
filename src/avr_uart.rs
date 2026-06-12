@@ -5,10 +5,7 @@ use core::{
 };
 
 use avr_device::{at90can128, interrupt::Mutex};
-use avr_hal_generic::port::{
-    PinOps,
-    mode::{Floating, Input, Output, PullUp},
-};
+use avr_hal_generic::port::mode::{Floating, Input, Output, PullUp};
 use embedded_io::{ErrorKind, ErrorType};
 use embedded_io_async::{Read, Write};
 
