@@ -1,13 +1,12 @@
-pub mod io_bus_8;
-
 use core::{
     cell::RefCell,
     marker::PhantomData,
+    mem::transmute,
     task::{Context, Poll, Waker},
 };
 
 use avr_device::{
-    at90can128::{EXINT, PORTC},
+    at90can128::{self, EXINT, PORTC},
     interrupt::Mutex,
 };
 use embedded_hal::digital::{InputPin, OutputPin};
@@ -27,8 +26,8 @@ static FT240_BUS: Mutex<RefCell<Option<Ft240xBus<PORTC, PG2>>>> = Mutex::new(Ref
 static FT240_READER: Mutex<RefCell<Option<Ft240xReader<PORTC, PE4, PE6>>>> =
     Mutex::new(RefCell::new(None));
 // static shared ft2401 writer
-static FT240_WRITER: Mutex<RefCell<Option<Ft240xWriter<PORTC, PE7, PE2, PE5>>>> =
-    Mutex::new(RefCell::new(None));
+static FT240_WRITER: Mutex<RefCell<Ft240xWriter<PORTC, PE7, PE2, PE5>>> =
+    Mutex::new(RefCell::new(Ft240xWriter::new()));
 
 pub struct Ft240x;
 
@@ -54,7 +53,12 @@ impl Ft240x {
             // set the reader
             *FT240_READER.borrow(cs).borrow_mut() = Some(Ft240xReader::new(rd, rxf));
             // set the writer
-            *FT240_WRITER.borrow(cs).borrow_mut() = Some(Ft240xWriter::new(wr, siwu, txe));
+            // *FT240_WRITER.borrow(cs).borrow_mut() = Some(Ft240xWriter::new(wr, siwu, txe));
+            // *FT240_WRITER.borrow(cs).borrow_mut() = Some(Ft240xWriter::new());
+            let mut writer = FT240_WRITER.borrow(cs).borrow_mut();
+            writer.init();
+            // control.init(Some(sense), Some(reset), Some(defaults));
+            // control.init(None, None, None);
         });
         // return handles
         (Ft240xReaderHandle, Ft240xWriterHandle)
@@ -84,6 +88,14 @@ impl Ft240xBus<PORTC, PG2> {
         }
     }
 
+    // pub const fn new() -> Self {
+    //     Self {
+    //         bus: unsafe { transmute(()) },
+    //         sense: unsafe { transmute(()) },
+    //         state: BusState::Unknown,
+    //     }
+    // }
+
     #[inline(always)]
     fn is_connected(&mut self) -> bool {
         self.sense.is_high()
@@ -105,7 +117,7 @@ impl Ft240xBus<PORTC, PG2> {
 
     // set the bus to an output
     #[inline(always)]
-    pub fn configure_bus_as_output(mut self) {
+    pub fn configure_bus_as_output(&mut self) {
         // if its not already an output
         if self.state != BusState::Output {
             // DDRC register controls pin direction (0xFF sets all 8 pins to output)
@@ -223,11 +235,7 @@ fn INT6() {
 pub struct Ft240xReaderHandle;
 
 impl Ft240xReaderHandle {
-    pub async fn read_to(
-        &mut self,
-        term: u8,
-        buf: &mut FlatBuffer<'_>,
-    ) -> Result<bool, BufferError> {
+    pub async fn read_to(&mut self, term: u8, buf: &mut FlatBuffer<'_>) -> Result<bool, ErrorKind> {
         loop {
             match self.try_read_to(term, buf).await {
                 // haven't read terminator yet, continue
@@ -242,51 +250,59 @@ impl Ft240xReaderHandle {
         &mut self,
         term: u8,
         buf: &mut FlatBuffer<'_>,
-    ) -> Result<bool, BufferError> {
+    ) -> Result<bool, ErrorKind> {
         // did we get called with a full buffer
         if buf.is_full() {
-            return Err(BufferError::BufferEmpty);
+            return Err(ErrorKind::OutOfMemory);
         }
         // wait until we can read
         if let Err(kind) = Ft240xCanRead.await {
-            return Err(kind.into());
+            return Err(kind);
         }
 
-        // we know we can read at least one, from the rts await above
-        let byte = self.read_byte();
-        // write it to the receive buffer, we can discard the result since we checked above
-        _ = buf.write_byte(byte);
-        // did we catch the terminator
-        // if byte == term {
-        return Ok(true);
-
-        // walk the buffer
-        let result = loop {
-            // is the receiving buffer full
-            if buf.is_full() {
-                break Err(BufferError::InsufficientSpace);
+        // disable interrupts while reading hardware
+        avr_device::interrupt::free(|cs| {
+            // get the bus
+            if let Some(bus) = FT240_BUS.borrow(cs).borrow_mut().as_mut() {
+                // see if we are connected
+                if bus.is_connected() {
+                    // get the reader
+                    if let Some(reader) = FT240_READER.borrow(cs).borrow_mut().as_mut() {
+                        bus.configure_bus_as_input();
+                        // we know we can read at least one, from the await above
+                        loop {
+                            // we know we can read at least one, from the rts await above
+                            let byte = reader.read_byte(&mut bus.bus);
+                            // write it to the receive buffer, we can discard the result since we checked above
+                            _ = buf.write_byte(byte);
+                            // did we catch the terminator
+                            if byte == term {
+                                return Ok(true);
+                            }
+                            // is the receiving buffer full
+                            if buf.is_full() {
+                                return Err(ErrorKind::NotConnected);
+                            }
+                            // make sure were connected
+                            if !bus.is_connected() {
+                                // this should be something different
+                                return Err(ErrorKind::NotConnected);
+                            }
+                            // make sure the ft240x has something to read
+                            if !reader.can_read() {
+                                return Ok(false);
+                            }
+                        }
+                    } else {
+                        return Err(ErrorKind::NotConnected);
+                    }
+                } else {
+                    return Err(ErrorKind::NotConnected);
+                }
+            } else {
+                return Err(ErrorKind::NotConnected);
             }
-            // we know we can read at least one, from the rts await above
-            let byte = self.read_byte();
-            // write it to the receive buffer, we can discard the result since we checked above
-            _ = buf.write_byte(byte);
-            // did we catch the terminator
-            // if byte == term {
-            break Ok(true);
-            // }
-
-            // make sure were connected
-            if !self.bus.is_connected() {
-                // this should be something different
-                break Err(BufferError::InsufficientSpace);
-            }
-            // make sure the ft240x has something to read
-            if !self.can_read() {
-                break Ok(false);
-            }
-        };
-        // return the result
-        result
+        })
     }
 }
 
@@ -341,55 +357,96 @@ impl Read for Ft240xReaderHandle {
         if let Err(kind) = Ft240xCanRead.await {
             return Err(kind);
         }
-        // initialize the number of bytes read
-        let mut bytes = 0;
-        // walk the buffer
-        for byte in buf.iter_mut() {
-            // we know we can read at least one, from the rts await above
-            *byte = self.read_byte();
-            // increment the number of bytes read
-            bytes += 1;
-            // make sure were connected
-            if !self.bus.is_connected() {
-                break;
+        // disable interrupts while reading hardware
+        avr_device::interrupt::free(|cs| {
+            // get the bus
+            if let Some(bus) = FT240_BUS.borrow(cs).borrow_mut().as_mut() {
+                // see if we are connected
+                if bus.is_connected() {
+                    // get the reader
+                    if let Some(reader) = FT240_READER.borrow(cs).borrow_mut().as_mut() {
+                        bus.configure_bus_as_input();
+                        // we know we can read at least one, from the await above
+                        // initialize the number of bytes read
+                        let mut bytes = 0;
+                        // walk the buffer
+                        for byte in buf.iter_mut() {
+                            // we know we can read at least one, from the rts await above
+                            *byte = reader.read_byte(&mut bus.bus);
+                            // increment the number of bytes read
+                            bytes += 1;
+                            // make sure were connected
+                            if !bus.is_connected() {
+                                // this should be something different
+                                return Err(ErrorKind::NotConnected);
+                            }
+                            // make sure the ft240x has something to read
+                            if !reader.can_read() {
+                                return Ok(bytes);
+                            }
+                        }
+                        return Ok(bytes);
+                    } else {
+                        return Err(ErrorKind::NotConnected);
+                    }
+                } else {
+                    return Err(ErrorKind::NotConnected);
+                }
+            } else {
+                return Err(ErrorKind::NotConnected);
             }
-            // make sure the ft240x has something to read
-            if !self.can_read() {
-                break;
-            }
-        }
-        // here we read at least one so, return the number of bytes read
-        Ok(bytes)
+        })
     }
 }
 
 // writer for ft240x
 pub struct Ft240xWriter<BUS, WR, SIWU, TXE> {
-    _bus: PhantomData<BUS>,
+    bus: BUS,
     wr: Pin<Output, WR>, // output to have the FT240 read data byte from data bus to its transmit FIFO
     siwu: Pin<Output, SIWU>, // output to tell the FT240 to flush its transmit FIFO buffer to the PC
     txe: Pin<Input<Floating>, TXE>, // input to tell when the FT240 can accept data.
     waker: Option<Waker>,
+    // _bus: PhantomData<BUS>,
+    // wr: Pin<Output, WR>, // output to have the FT240 read data byte from data bus to its transmit FIFO
+    // siwu: Pin<Output, SIWU>, // output to tell the FT240 to flush its transmit FIFO buffer to the PC
+    // txe: Pin<Input<Floating>, TXE>, // input to tell when the FT240 can accept data.
+    // waker: Option<Waker>,
 }
 
 impl Ft240xWriter<PORTC, PE7, PE2, PE5> {
     const TX_EXT_INT5: u8 = 1 << 5;
 
-    pub fn new(
-        wr: Pin<Output, PE7>,
-        siwu: Pin<Output, PE2>,
-        txe: Pin<Input<Floating>, PE5>,
-    ) -> Self {
-        // configure interrupts
-        Self::configure_tx_int();
-        // initialize a writer
-        Self {
-            _bus: PhantomData,
-            wr,
-            siwu,
-            txe,
-            waker: None,
+    // pub fn new(
+    //     wr: Pin<Output, PE7>,
+    //     siwu: Pin<Output, PE2>,
+    //     txe: Pin<Input<Floating>, PE5>,
+    // ) -> Self {
+    //     // configure interrupts
+    //     Self::configure_tx_int();
+    //     // initialize a writer
+    //     Self {
+    //         _bus: PhantomData,
+    //         wr,
+    //         siwu,
+    //         txe,
+    //         waker: None,
+    //     }
+    // }
+
+    pub const fn new() -> Self {
+        unsafe {
+            Self {
+                bus: transmute(()),
+                wr: transmute(()),
+                siwu: transmute(()),
+                txe: transmute(()),
+                waker: None,
+            }
         }
+    }
+
+    pub fn init(&self) {
+        self.configure_tx_int();
     }
 
     #[inline(always)]
@@ -401,9 +458,10 @@ impl Ft240xWriter<PORTC, PE7, PE2, PE5> {
     // NOTE:  This sub is not thread safe and should be called with interrupts disabled if interrupts are being used.
     // TODO: HOT make this one inline assembly block
     #[inline(always)]
-    pub fn write_byte(&mut self, bus: &mut PORTC, byte: u8) {
+    // pub fn write_byte(&mut self, bus: &mut PORTC, byte: u8) {
+    pub fn write_byte(&mut self, byte: u8) {
         // put the data onto the pins
-        bus.portc().write(|w| unsafe { w.bits(byte) });
+        self.bus.portc().write(|w| unsafe { w.bits(byte) });
         // pull the WR line low so FT240 will sample the data bus and store it to its FIFO
         self.wr.set_low();
         // preform a nop to allow time for the FT240 to sample the data bus
@@ -424,7 +482,7 @@ impl Ft240xWriter<PORTC, PE7, PE2, PE5> {
     }
 
     #[inline(always)]
-    fn configure_tx_int() {
+    fn configure_tx_int(&self) {
         unsafe {
             // setup TXE(PE5/INT5) to trigger on falling edges
             (*EXINT::ptr())
@@ -474,11 +532,9 @@ fn INT5() {
     // forge a token. This is safe ONLY because we are in an ISR.
     let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
     // take and wake the waker
-    FT240_WRITER.borrow(cs).borrow_mut().as_mut().map(|reader| {
-        if let Some(waker) = reader.waker.take() {
-            waker.wake();
-        }
-    });
+    if let Some(waker) = FT240_WRITER.borrow(cs).borrow_mut().waker.take() {
+        waker.wake();
+    }
     // disable the interrupt
     Ft240xWriter::txe_int_disable();
 }
@@ -496,28 +552,47 @@ impl Write for Ft240xWriterHandle {
             return Err(ErrorKind::InvalidInput);
         }
         // wait until the ft240 can accept data
-        if let Err(kind) = self.data_can_be_written().await {
+        if let Err(kind) = Ft240xCanWrite.await {
             return Err(kind);
         }
-        // initialize the number of bytes written
-        let mut bytes = 0;
-        // walk the buffer
-        for byte in buf.iter() {
-            // we know we can write at least one, from the cts await above
-            let _ = self.write_byte(*byte);
-            // increment the number of bytes written
-            bytes += 1;
-            // make sure were connected
-            if !self.bus.is_connected() {
-                break;
+        // disable interrupts while reading hardware
+        avr_device::interrupt::free(|cs| {
+            // get the bus
+            if let Some(bus) = FT240_BUS.borrow(cs).borrow_mut().as_mut() {
+                // see if we are connected
+                if bus.is_connected() {
+                    // get the reader
+                    // if let Some(writer) = FT240_WRITER.borrow(cs).borrow_mut().as_mut() {
+                    let mut writer = FT240_WRITER.borrow(cs).borrow_mut();
+
+                    bus.configure_bus_as_output();
+                    // initialize the number of bytes written
+                    let mut bytes = 0;
+                    // walk the buffer
+                    for byte in buf.iter() {
+                        // we know we can write at least one, from the cts await above
+                        let _ = writer.write_byte(*byte);
+                        // increment the number of bytes written
+                        bytes += 1;
+                        // make sure were connected
+                        if !bus.is_connected() {
+                            break;
+                        }
+                        // make sure the ft240x can accept
+                        if !writer.can_write() {
+                            break;
+                        }
+                    }
+                    return Ok(bytes);
+                } else {
+                    //     return Err(ErrorKind::NotConnected);
+                    // }                } else {
+                    return Err(ErrorKind::NotConnected);
+                }
+            } else {
+                return Err(ErrorKind::NotConnected);
             }
-            // make sure the ft240x can accept
-            if !self.can_write() {
-                break;
-            }
-        }
-        // here we sent at least one, so return the number of bytes written
-        Ok(bytes)
+        })
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
@@ -543,16 +618,12 @@ impl Future for Ft240xCanWrite {
             }
             // get the writer
             let mut writer = FT240_WRITER.borrow(cs).borrow_mut();
-            // do we have a reader
-            if writer.is_none() {
-                return Poll::Ready(Err(ErrorKind::NotConnected));
-            }
             // now see if its clear to send
-            if writer.as_mut().is_some_and(|w| w.can_write()) {
+            if writer.can_write() {
                 return Poll::Ready(Ok(()));
             }
             // else we cant send.  register the waker
-            writer.as_mut().map(|w| w.waker = Some(cx.waker().clone()));
+            writer.waker = Some(cx.waker().clone());
             // enable interrupts
             Ft240xWriter::txe_int_enable();
             // return pending
