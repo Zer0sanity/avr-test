@@ -52,8 +52,14 @@ fn main() -> ! {
 
     // network uart (maybe make these more generic and just pass downgraded inputs/outputs and let driver configure)
     // also the sense/reset/defaults are specific to xpico so maybe don't include in uart
+    let cts = pins.pg3.into_output();
+    let rts = pins.pg4.into_floating_input();
+    let sense = pins.pd7.into_pull_up_input();
+    let reset = pins.pd4.into_output_high();
+    let defaults = pins.pg0.into_output_high();
+
     let (ethernet_reader, ethernet_writer) =
-        AvrUart::init(dp.USART1, pins.pg3, pins.pg4, pins.pd7, pins.pd4, pins.pg0);
+        AvrUart::init(dp.USART1, cts, rts, sense, reset, defaults);
 
     // initialize usb
     let bus = dp.PORTC;

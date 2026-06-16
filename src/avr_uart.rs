@@ -1,6 +1,7 @@
 use core::{
     cell::RefCell,
     marker::PhantomData,
+    ptr,
     task::{Context, Poll, Waker},
 };
 
@@ -19,8 +20,8 @@ use at90can128::USART1;
 
 // struct for reading the usart
 pub struct UsartReader<USART, CTS, const BUFFER_CAPACITY: usize> {
-    _usart: PhantomData<USART>,
-    cts_opt: Option<Pin<Output, CTS>>,
+    usart: USART,
+    cts: Pin<Output, CTS>,
     buffer: ConstCircularBuffer<BUFFER_CAPACITY>,
     waker: Option<Waker>,
 }
@@ -32,25 +33,14 @@ impl UsartReader<USART1, PG3, BUFFER_CAPACITY> {
     const REASSERT_THRESHOLD: usize = BUFFER_CAPACITY / 2;
     // const initializer so this can be created in static ram
     pub const fn new() -> Self {
-        Self {
-            _usart: PhantomData,
-            cts_opt: None,
-            waker: None,
-            buffer: ConstCircularBuffer::new(),
-        }
-    }
-    // initializer to set the cts signal and initialize circular buffer pointers
-    pub fn init(&mut self, cts_opt: Option<Pin<Output, PG3>>) {
-        // set the cts pin option
-        self.cts_opt = cts_opt;
-        // enable rx interrupts
         unsafe {
-            (*USART1::ptr())
-                .ucsr1b()
-                .modify(|_, w| w.rxcie1().set_bit());
+            Self {
+                usart: ptr::read(ptr::dangling()),
+                cts: ptr::read(ptr::dangling()),
+                waker: None,
+                buffer: ConstCircularBuffer::new(),
+            }
         }
-        // set cts (active low)
-        self.cts_opt.as_mut().map(|cts| cts.set_low());
     }
 }
 
@@ -61,12 +51,12 @@ fn USART1_RX() {
     // get the reader
     let mut reader = USART1_READER.borrow(cs).borrow_mut();
     // read the byte from the hardware
-    let byte = unsafe { (*USART1::ptr()).udr1().read().bits() };
+    let byte = reader.usart.udr1().read().bits();
     // write the byte.
     _ = reader.buffer.write_byte(byte);
     // manage cts
     if reader.buffer.free_space() < UsartReader::DEASSERT_THRESHOLD {
-        reader.cts_opt.as_mut().map(|cts| cts.set_high());
+        reader.cts.set_high();
     }
     // kick the waker if its set
     if let Some(waker) = reader.waker.take() {
@@ -131,7 +121,7 @@ impl Usart1ReaderHandle {
             };
             // manage cts
             if UsartReader::REASSERT_THRESHOLD < reader.buffer.free_space() {
-                reader.cts_opt.as_mut().map(|cts| cts.set_low());
+                reader.cts.set_low();
             }
             // return the result
             result
@@ -172,7 +162,7 @@ impl Read for Usart1ReaderHandle {
             }
             // manage cts
             if UsartReader::REASSERT_THRESHOLD < reader.buffer.free_space() {
-                reader.cts_opt.as_mut().map(|cts| cts.set_low());
+                reader.cts.set_low();
             }
         });
         // here we read at least one so, return the number of bytes read
@@ -196,14 +186,9 @@ impl Future for Usart1CanRead {
                 return Poll::Ready(Ok(()));
             }
             // check if we are connected
-            let connected = USART1_CONTROL
-                .borrow(cs)
-                .borrow_mut()
-                .sense_opt
-                .as_ref()
-                .is_none_or(|sense| sense.is_high());
+            let control = USART1_CONTROL.borrow(cs).borrow_mut();
             // if not connected return an error
-            if !connected {
+            if !control.sense.is_high() {
                 return Poll::Ready(Err(ErrorKind::NotConnected));
             }
             // else no data to read.  register the waker
@@ -216,8 +201,8 @@ impl Future for Usart1CanRead {
 
 // struct for writing usart
 pub struct UsartWriter<USART, RTS, const BUFFER_CAPACITY: usize> {
-    _usart: PhantomData<USART>,
-    rts_opt: Option<Pin<Input<Floating>, RTS>>,
+    usart: USART,
+    rts: Pin<Input<Floating>, RTS>,
     flush_char_opt: Option<u8>,
     buffer: ConstCircularBuffer<BUFFER_CAPACITY>,
     waker_opt: Option<Waker>,
@@ -226,17 +211,16 @@ pub struct UsartWriter<USART, RTS, const BUFFER_CAPACITY: usize> {
 
 impl UsartWriter<USART1, PG4, BUFFER_CAPACITY> {
     pub const fn new() -> Self {
-        Self {
-            _usart: PhantomData,
-            rts_opt: None,
-            flush_char_opt: None,
-            buffer: ConstCircularBuffer::new(),
-            waker_opt: None,
-            tx_idle: true,
+        unsafe {
+            Self {
+                usart: ptr::read(core::ptr::dangling()),
+                rts: ptr::read(core::ptr::dangling()),
+                flush_char_opt: None,
+                buffer: ConstCircularBuffer::new(),
+                waker_opt: None,
+                tx_idle: true,
+            }
         }
-    }
-    pub fn init(&mut self, rts_opt: Option<Pin<Input<Floating>, PG4>>) {
-        self.rts_opt = rts_opt;
     }
 }
 
@@ -247,14 +231,14 @@ fn USART1_TX() {
     // get the writer
     let mut writer = USART1_WRITER.borrow(cs).borrow_mut();
     // check if we can send
-    let rts_ok = writer.rts_opt.as_ref().is_none_or(|rts| rts.is_low());
+    let rts_ok = writer.rts.is_low();
     // if we can send try to read a byte from writer
     if rts_ok && let Ok(byte) = writer.buffer.read_byte() {
         // write it to the hardware
-        unsafe { (*USART1::ptr()).udr1().write(|w| w.bits(byte)) };
+        writer.usart.udr1().write(|w| unsafe { w.bits(byte) });
     } else {
         // disable interrupts
-        unsafe { (*USART1::ptr()).ucsr1b().write(|w| w.udrie1().clear_bit()) };
+        writer.usart.ucsr1b().write(|w| w.udrie1().clear_bit());
         // set the tx_idle flag
         writer.tx_idle = true;
     }
@@ -289,7 +273,7 @@ impl Write for Usart1WriterHandle {
             // see if we need to enable interrupts
             if writer.tx_idle {
                 // enable interrupts
-                unsafe { (*USART1::ptr()).ucsr1b().write(|w| w.udrie1().set_bit()) };
+                writer.usart.ucsr1b().write(|w| w.udrie1().set_bit());
                 // clear the tx_idle flag
                 writer.tx_idle = false;
             }
@@ -317,7 +301,7 @@ impl Write for Usart1WriterHandle {
             // see if we need to enable interrupts
             if writer.tx_idle {
                 // enable interrupts
-                unsafe { (*USART1::ptr()).ucsr1b().write(|w| w.udrie1().set_bit()) };
+                writer.usart.ucsr1b().write(|w| w.udrie1().set_bit());
                 // clear the tx_idle flag
                 writer.tx_idle = false;
             }
@@ -343,14 +327,9 @@ impl Future for Usart1CanWrite {
                 return Poll::Ready(Ok(()));
             }
             // check if we are connected
-            let connected = USART1_CONTROL
-                .borrow(cs)
-                .borrow_mut()
-                .sense_opt
-                .as_ref()
-                .is_none_or(|sense| sense.is_high());
+            let control = USART1_CONTROL.borrow(cs).borrow_mut();
             // if not connected return an error
-            if !connected {
+            if !control.sense.is_high() {
                 return Poll::Ready(Err(ErrorKind::NotConnected));
             }
             // else no space available to write.  register the waker
@@ -376,14 +355,9 @@ impl Future for Usart1TxBufferEmpty {
                 return Poll::Ready(Ok(()));
             }
             // check if we are connected
-            let connected = USART1_CONTROL
-                .borrow(cs)
-                .borrow_mut()
-                .sense_opt
-                .as_ref()
-                .is_none_or(|sense| sense.is_high());
+            let control = USART1_CONTROL.borrow(cs).borrow_mut();
             // if not connected return an error
-            if !connected {
+            if !control.sense.is_high() {
                 return Poll::Ready(Err(ErrorKind::NotConnected));
             }
             // else no space available to write.  register the waker
@@ -396,28 +370,20 @@ impl Future for Usart1TxBufferEmpty {
 
 // struct to hold shared control ports
 pub struct UsartControlSignals<SENSE, RESET, DEFAULTS> {
-    sense_opt: Option<Pin<Input<PullUp>, SENSE>>,
-    reset_opt: Option<Pin<Output, RESET>>,
-    defaults_opt: Option<Pin<Output, DEFAULTS>>,
+    sense: Pin<Input<PullUp>, SENSE>,
+    reset: Pin<Output, RESET>,
+    defaults: Pin<Output, DEFAULTS>,
 }
 
 impl UsartControlSignals<PD7, PD4, PG0> {
     pub const fn new() -> Self {
-        Self {
-            sense_opt: None,
-            reset_opt: None,
-            defaults_opt: None,
+        unsafe {
+            Self {
+                sense: ptr::read(ptr::dangling()),
+                reset: ptr::read(ptr::dangling()),
+                defaults: ptr::read(ptr::dangling()),
+            }
         }
-    }
-    pub fn init(
-        &mut self,
-        sense_opt: Option<Pin<Input<PullUp>, PD7>>,
-        reset_opt: Option<Pin<Output, PD4>>,
-        defaults_opt: Option<Pin<Output, PG0>>,
-    ) {
-        self.sense_opt = sense_opt;
-        self.reset_opt = reset_opt;
-        self.defaults_opt = defaults_opt;
     }
 }
 
@@ -439,11 +405,11 @@ pub struct AvrUart;
 impl AvrUart {
     pub fn init(
         usart: at90can128::USART1,
-        cts: Pin<Input<Floating>, PG3>,
-        rts: Pin<Input<Floating>, PG4>,
-        sense: Pin<Input<Floating>, PD7>,
-        reset: Pin<Input<Floating>, PD4>,
-        defaults: Pin<Input<Floating>, PG0>,
+        _cts: Pin<Output, PG3>,
+        _rts: Pin<Input<Floating>, PG4>,
+        _sense: Pin<Input<PullUp>, PD7>,
+        _reset: Pin<Output, PD4>,
+        _defaults: Pin<Output, PG0>,
     ) -> (Usart1ReaderHandle, Usart1WriterHandle) {
         // control register a
         usart.ucsr1a().modify(|_, w| {
@@ -454,8 +420,8 @@ impl AvrUart {
         });
         // control register b
         usart.ucsr1b().modify(|_, w| {
-            // disable rx complete interrupt enable (we will enable it when the reader is initialized)
-            w.rxcie1().clear_bit();
+            // enable rx complete interrupt enable (we will enable it when the reader is initialized)
+            w.rxcie1().set_bit();
             // disable tx complete interrupt enable
             w.txcie1().clear_bit();
             // disable data register empty interrupt enable (we will enable this later when we transmit data)
@@ -482,27 +448,6 @@ impl AvrUart {
         });
         // set the baud-rate (0x0f = 57.6k in current configuration )
         usart.ubrr1().modify(|_, w| w.set(0x0f));
-
-        let cts = cts.into_output();
-        let rts = rts.into_floating_input();
-        let _sense = sense.into_pull_up_input();
-        let _reset = reset.into_output_high();
-        let _defaults = defaults.into_output_high();
-
-        // put into static memory
-        avr_device::interrupt::free(|cs| {
-            // reader
-            let mut reader = USART1_READER.borrow(cs).borrow_mut();
-            reader.init(Some(cts));
-            // writer
-            let mut writer = USART1_WRITER.borrow(cs).borrow_mut();
-            writer.init(Some(rts));
-            // control pins
-            let mut control = USART1_CONTROL.borrow(cs).borrow_mut();
-            // control.init(Some(sense), Some(reset), Some(defaults));
-            control.init(None, None, None);
-        });
-
         // return
         (Usart1ReaderHandle, Usart1WriterHandle)
     }

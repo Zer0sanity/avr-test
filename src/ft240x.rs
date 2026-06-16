@@ -1,6 +1,6 @@
 use core::{
     cell::RefCell,
-    mem::transmute,
+    ptr,
     task::{Context, Poll, Waker},
 };
 
@@ -49,14 +49,14 @@ impl Ft240x<PORTC, PG2, PE4, PE6, PE7, PE5, PE2> {
     pub const fn new() -> Self {
         unsafe {
             Self {
-                bus: core::ptr::read(core::ptr::dangling()),
+                bus: ptr::read(ptr::dangling()),
                 state: BusState::Unknown,
-                sense: core::ptr::read(core::ptr::dangling()),
-                rd: core::ptr::read(core::ptr::dangling()),
-                rxf: core::ptr::read(core::ptr::dangling()),
-                wr: core::ptr::read(core::ptr::dangling()),
-                txe: core::ptr::read(core::ptr::dangling()),
-                siwu: core::ptr::read(core::ptr::dangling()),
+                sense: ptr::read(ptr::dangling()),
+                rd: ptr::read(ptr::dangling()),
+                rxf: ptr::read(ptr::dangling()),
+                wr: ptr::read(ptr::dangling()),
+                txe: ptr::read(ptr::dangling()),
+                siwu: ptr::read(ptr::dangling()),
                 rx_waker: None,
                 tx_waker: None,
             }
