@@ -56,9 +56,14 @@ fn main() -> ! {
         AvrUart::init(dp.USART1, pins.pg3, pins.pg4, pins.pd7, pins.pd4, pins.pg0);
 
     // initialize usb
-    let (usb_reader, usb_writer) = Ft240x::init(
-        dp.PORTC, pins.pg2, pins.pe4, pins.pe7, pins.pe2, pins.pe6, pins.pe5,
-    );
+    let bus = dp.PORTC;
+    let sense = pins.pg2;
+    let rd = pins.pe4.into_output_high();
+    let rxf = pins.pe6;
+    let wr = pins.pe7.into_output_high();
+    let txe = pins.pe5;
+    let siwu = pins.pe2.into_output_high();
+    let (usb_reader, usb_writer) = Ft240x::init(bus, sense, rd, rxf, wr, txe, siwu);
 
     Timer::init(&dp.TC1);
 
@@ -86,10 +91,11 @@ pub async fn usart1_reader_task(
     // get some buffers
     let mut rx_buffer: FlatBuffer = BufferRequest.await.into();
     let mut tx_buffer: FlatBuffer = BufferRequest.await.into();
+
+    let _ = writer.write("uart reader starting\r\n".as_bytes()).await;
+
     // turn off the led
     led.on();
-
-    let _ = writer.write_all("hi".as_bytes()).await;
 
     loop {
         rx_buffer.reset();
@@ -97,6 +103,7 @@ pub async fn usart1_reader_task(
 
         // preform a read
         let packet_received = reader.read_to(0x0a, &mut rx_buffer).await;
+
         let len = rx_buffer.len();
         // see what happened
         match packet_received {
@@ -111,7 +118,7 @@ pub async fn usart1_reader_task(
             }
         };
         // write it
-        let _ = writer.write_all(tx_buffer.as_ref()).await;
+        let _ = writer.write(tx_buffer.as_ref()).await;
         // blink the led on
         led.toggle();
     }
@@ -130,13 +137,13 @@ pub async fn ft240_reader_task(
 
     loop {
         rx_buffer.reset();
-        tx_buffer.reset();
+        // tx_buffer.reset();
 
         // // preform a read
         // let packet_received = reader.read_to(0x0a, &mut rx_buffer).await;
 
         let mut rx_slice = rx_buffer.as_mut();
-        let packet_received = reader.read(&mut rx_slice).await;
+        // let packet_received = reader.read(&mut rx_slice).await;
         // // get the buffer as a mutable slice
         // // let rx_buffer1 = rx_buffer.as_mut();
         // // preform a read
@@ -144,20 +151,22 @@ pub async fn ft240_reader_task(
         // // let rx_result = reader.read(&mut fuck).await;
         // // see what happened
         // led.toggle();
-        match packet_received {
-            Ok(len) => {
-                let _ = tx_buffer.write_all(&rx_slice[..len]);
-                let _ = tx_buffer.write_str(" bytes: ");
-                let _ = tx_buffer.write_byte(len as u8 + 0x30);
-                let _ = tx_buffer.write_str("\r\n");
-            }
-            Err(_) => {
-                // _ = write!(tx_buffer, "error: {} \r\n", e);
-            }
-        };
+        // match packet_received {
+        //     Ok(len) => {
+        //         let _ = tx_buffer.write_all(&rx_slice[..len]);
+        //         let _ = tx_buffer.write_str(" bytes: ");
+        //         let _ = tx_buffer.write_byte(len as u8 + 0x30);
+        //         let _ = tx_buffer.write_str("\r\n");
+        //     }
+        //     Err(_) => {
+        //         // _ = write!(tx_buffer, "error: {} \r\n", e);
+        //     }
+        // };
         // write it
-        let _ = writer.write(tx_buffer.as_ref()).await;
-        let _ = writer.flush().await;
+        // let _ = writer.write(tx_buffer.as_ref()).await;
+        // let _ = writer.flush().await;
+
+        Timer::delay(1000).await;
         // blink the led on
         led.toggle();
     }

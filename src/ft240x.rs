@@ -19,7 +19,7 @@ use crate::{
 };
 
 // static shared ft240x interface
-static FT240X: Mutex<RefCell<Ft240x<PORTC, PG2, PE4, PE7, PE2, PE6, PE5>>> =
+static FT240X: Mutex<RefCell<Ft240x<PORTC, PG2, PE4, PE6, PE7, PE5, PE2>>> =
     Mutex::new(RefCell::new(Ft240x::new()));
 
 #[derive(Clone, Copy, PartialEq)]
@@ -29,34 +29,34 @@ enum BusState {
     Output,
 }
 
-pub struct Ft240x<BUS, SENSE, RD, RXF, WR, SIWU, TXE> {
+pub struct Ft240x<BUS, SENSE, RD, RXF, WR, TXE, SIWU> {
     bus: BUS,
     state: BusState,
     sense: Pin<Input<Floating>, SENSE>, // input to tell if usb host is connected
     rd: Pin<Output, RD>, // output to have the FT240 put a received byte from its FIFO to the data bus
     rxf: Pin<Input<Floating>, RXF>, // input to tell when data can be read from the FT240.
     wr: Pin<Output, WR>, // output to have the FT240 read data byte from data bus to its transmit FIFO
-    siwu: Pin<Output, SIWU>, // output to tell the FT240 to flush its transmit FIFO buffer to the PC
     txe: Pin<Input<Floating>, TXE>, // input to tell when the FT240 can accept data.
+    siwu: Pin<Output, SIWU>, // output to tell the FT240 to flush its transmit FIFO buffer to the PC
     rx_waker: Option<Waker>,
     tx_waker: Option<Waker>,
 }
 
-impl Ft240x<PORTC, PG2, PE4, PE7, PE2, PE6, PE5> {
+impl Ft240x<PORTC, PG2, PE4, PE6, PE7, PE5, PE2> {
     const RX_EXT_INT6: u8 = 1 << 6;
     const TX_EXT_INT5: u8 = 1 << 5;
 
     pub const fn new() -> Self {
         unsafe {
             Self {
-                bus: transmute(()),
+                bus: core::ptr::read(core::ptr::dangling()),
                 state: BusState::Unknown,
-                sense: transmute(()),
-                rd: transmute(()),
-                rxf: transmute(()),
-                wr: transmute(()),
-                siwu: transmute(()),
-                txe: transmute(()),
+                sense: core::ptr::read(core::ptr::dangling()),
+                rd: core::ptr::read(core::ptr::dangling()),
+                rxf: core::ptr::read(core::ptr::dangling()),
+                wr: core::ptr::read(core::ptr::dangling()),
+                txe: core::ptr::read(core::ptr::dangling()),
+                siwu: core::ptr::read(core::ptr::dangling()),
                 rx_waker: None,
                 tx_waker: None,
             }
@@ -68,16 +68,12 @@ impl Ft240x<PORTC, PG2, PE4, PE7, PE2, PE6, PE5> {
     pub fn init(
         _bus: PORTC,
         _sense: Pin<Input<Floating>, PG2>,
-        rd: Pin<Input<Floating>, PE4>,
-        wr: Pin<Input<Floating>, PE7>,
-        siwu: Pin<Input<Floating>, PE2>,
+        _rd: Pin<Output, PE4>,
         _rxf: Pin<Input<Floating>, PE6>,
+        _wr: Pin<Output, PE7>,
         _txe: Pin<Input<Floating>, PE5>,
+        _siwu: Pin<Output, PE2>,
     ) -> (Ft240xReaderHandle, Ft240xWriterHandle) {
-        // configure output pins
-        let _rd = rd.into_output();
-        let _wr = wr.into_output();
-        let _siwu = siwu.into_output();
         // configure the interrupts
         unsafe {
             // setup RXF(PE6/INT6) to trigger on falling edges
@@ -155,6 +151,7 @@ impl Ft240x<PORTC, PG2, PE4, PE7, PE2, PE6, PE5> {
         }
         // put the data onto the pins
         self.bus.portc().write(|w| unsafe { w.bits(byte) });
+
         // pull the WR line low so FT240 will sample the data bus and store it to its FIFO
         self.wr.set_low();
         // preform a nop to allow time for the FT240 to sample the data bus
@@ -421,33 +418,32 @@ impl Write for Ft240xWriterHandle {
         if let Err(kind) = Ft240xCanWrite.await {
             return Err(kind);
         }
-        // disable interrupts while reading hardware
-        avr_device::interrupt::free(|cs| {
-            // get the ft240x interface
-            let mut usb = FT240X.borrow(cs).borrow_mut();
-            // see if we are connected
-            if !usb.is_connected() {
-                return Err(ErrorKind::NotConnected);
+        // index into buffer
+        let mut idx = 0;
+        // while we have bytes to send or we can't
+        loop {
+            let byte = buf[idx];
+
+            // disable interrupts we write
+            avr_device::interrupt::free(|cs| {
+                // get the ft240x interface
+                let mut usb = FT240X.borrow(cs).borrow_mut();
+                // write the byte
+                usb.write_byte(buf[idx]);
+            });
+            // increment the number of bytes written
+            idx += 1;
+            // can we still send
+            let done = avr_device::interrupt::free(|cs| {
+                // get the ft240x interface
+                let mut usb = FT240X.borrow(cs).borrow_mut();
+                idx == buf.len() || !usb.can_write() || !usb.is_connected()
+            });
+            // are we done
+            if done {
+                break Ok(idx);
             }
-            // initialize the number of bytes written
-            let mut bytes = 0;
-            // walk the buffer
-            for byte in buf.iter() {
-                // we know we can write at least one, from the cts await above
-                let _ = usb.write_byte(*byte);
-                // increment the number of bytes written
-                bytes += 1;
-                // make sure were connected
-                if !usb.is_connected() {
-                    break;
-                }
-                // make sure the ft240x can accept
-                if !usb.can_write() {
-                    break;
-                }
-            }
-            return Ok(bytes);
-        })
+        }
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
