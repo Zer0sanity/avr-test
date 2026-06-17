@@ -419,29 +419,30 @@ impl Write for Ft240xWriterHandle {
             return Err(kind);
         }
         // index into buffer
-        let mut idx = 0;
+        let mut bytes_written = 0;
         // while we have bytes to send or we can't
         loop {
-            let byte = buf[idx];
-
+            // read the byte
+            let byte = buf[bytes_written];
             // disable interrupts we write
             avr_device::interrupt::free(|cs| {
                 // get the ft240x interface
                 let mut usb = FT240X.borrow(cs).borrow_mut();
                 // write the byte
-                usb.write_byte(buf[idx]);
+                usb.write_byte(byte);
             });
             // increment the number of bytes written
-            idx += 1;
+            bytes_written += 1;
             // can we still send
             let done = avr_device::interrupt::free(|cs| {
                 // get the ft240x interface
                 let mut usb = FT240X.borrow(cs).borrow_mut();
-                idx == buf.len() || !usb.can_write() || !usb.is_connected()
+                // evaluate done condition
+                bytes_written == buf.len() || !usb.can_write() || !usb.is_connected()
             });
             // are we done
             if done {
-                break Ok(idx);
+                break Ok(bytes_written);
             }
         }
     }

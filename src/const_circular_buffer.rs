@@ -1,4 +1,4 @@
-use core::{cmp::min, fmt};
+use core::{cmp::min, fmt, ptr};
 
 use crate::{BufferError, ReadError, ReadStatus};
 
@@ -76,7 +76,7 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
     }
 
     #[inline(always)]
-    pub fn read(&mut self, mut dest: &mut [u8]) -> Result<usize, ReadError> {
+    pub fn read(&mut self, dest: &mut [u8]) -> Result<usize, ReadError> {
         // is the destination empty
         if dest.is_empty() {
             return Err(ReadError::DestinationEmpty);
@@ -91,16 +91,24 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
         let len_to_end = CAPACITY - self.r_pos;
         // figure out if we can copy the whole thing or just to the end of the buffer
         let first_copy_len = min(len, len_to_end);
-        let first_copy_end = self.r_pos + first_copy_len;
-        // preform the copy
-        dest[..first_copy_len].copy_from_slice(&self.buf[self.r_pos..first_copy_end]);
-        // figure out if we have a second half to write
-        let second_copy_len = len - first_copy_len;
-        if second_copy_len > 0 {
+        // pointer stuff is unsafe and is being used as an optimization for block copying
+        unsafe {
+            // convert to pointers
+            let src_ptr = self.buf.as_ptr().add(self.r_pos);
+            let dst_ptr = dest.as_mut_ptr();
             // preform the copy
-            dest[first_copy_len..len].copy_from_slice(&self.buf[..second_copy_len]);
+            ptr::copy_nonoverlapping(src_ptr, dst_ptr, first_copy_len);
+            // figure out if we have a second half to write
+            let second_copy_len = len - first_copy_len;
+            if second_copy_len > 0 {
+                // convert to pointers
+                let src_ptr_wrapped = self.buf.as_ptr();
+                let dst_ptr_wrapped = dst_ptr.add(first_copy_len);
+                // preform the copy
+                ptr::copy_nonoverlapping(src_ptr_wrapped, dst_ptr_wrapped, second_copy_len);
+            }
         }
-        // update the write position
+        // update the read position
         self.r_pos += len;
         // check for wrapping
         if self.r_pos >= CAPACITY {
@@ -113,7 +121,7 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
     }
 
     #[inline(always)]
-    pub fn try_read_to(&mut self, term: u8, mut dest: &mut [u8]) -> Result<ReadStatus, ReadError> {
+    pub fn read_to(&mut self, term: u8, dest: &mut [u8]) -> Result<ReadStatus, ReadError> {
         // is the destination empty
         if dest.is_empty() {
             return Err(ReadError::DestinationEmpty);
@@ -124,41 +132,56 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
         }
         // get how much we can read
         let len_allowed = min(dest.len(), self.len());
-        // loop through the allowable read length and search for the terminator
-        let mut idx = self.r_pos;
-        let mut len_to_term = 0;
-        let (term_found, len) = loop {
-            // increment the length to the terminator
-            len_to_term += 1;
-            // check for the terminator
-            if self.buf[self.r_pos] == term {
-                break (true, len_to_term);
-            }
-            // are we at the allowed length
-            if len_to_term == len_allowed {
-                break (false, len_allowed);
-            }
-            // increment the index
-            idx += 1;
-            // check for rollover
-            if idx == CAPACITY {
-                idx = 0;
-            }
-        };
         // get the length from the read position to the end
         let len_to_end = CAPACITY - self.r_pos;
+        // split the wrapped buffer into two separate slices
+        let (first_half, second_half) = if len_allowed <= len_to_end {
+            // allowed length is less then the length to the end of our buffer.  we only need
+            // one slice from the read position to the read position + allowed length
+            (
+                &self.buf[self.r_pos..self.r_pos + len_allowed],
+                &self.buf[..],
+            )
+        } else {
+            // allowed length is greater then the length to the end of the buffer.  we need to split
+            // one slice from the read position to the end of the buffer and one from the start of the
+            // buffer to the length allowed minus what was needed to get to the end of the buffer
+            (
+                &self.buf[self.r_pos..CAPACITY],
+                &self.buf[..len_allowed - len_to_end],
+            )
+        };
+        // try to find the terminator from what we can read
+        let (term_found, len) = if let Some(pos) = first_half.iter().position(|&b| b == term) {
+            // found in the first half
+            (true, pos + 1)
+        } else if let Some(pos) = second_half.iter().position(|&b| b == term) {
+            // found in the second half
+            (true, first_half.len() + pos + 1)
+        } else {
+            // not found, read all we can
+            (false, len_allowed)
+        };
         // figure out if we can copy the whole thing or just to the end of the buffer
         let first_copy_len = min(len, len_to_end);
-        let first_copy_end = self.r_pos + first_copy_len;
-        // preform the copy
-        dest[..first_copy_len].copy_from_slice(&self.buf[self.r_pos..first_copy_end]);
-        // figure out if we have a second half to write
-        let second_copy_len = len - first_copy_len;
-        if second_copy_len > 0 {
+        // pointer stuff is unsafe and is being used as an optimization for block copying
+        unsafe {
+            // convert to pointers
+            let src_ptr = first_half.as_ptr();
+            let dst_ptr = dest.as_mut_ptr();
             // preform the copy
-            dest[first_copy_len..len].copy_from_slice(&self.buf[..second_copy_len]);
+            ptr::copy_nonoverlapping(src_ptr, dst_ptr, first_copy_len);
+            // figure out if we have a second half to write
+            let second_copy_len = len - first_copy_len;
+            if second_copy_len > 0 {
+                // convert to pointers
+                let src_ptr_wrapped = second_half.as_ptr();
+                let dst_ptr_wrapped = dst_ptr.add(first_copy_len);
+                // preform the copy
+                ptr::copy_nonoverlapping(src_ptr_wrapped, dst_ptr_wrapped, second_copy_len);
+            }
         }
-        // update the write position
+        // update the read position
         self.r_pos += len;
         // check for wrapping
         if self.r_pos >= CAPACITY {

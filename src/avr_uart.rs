@@ -1,6 +1,5 @@
 use core::{
     cell::RefCell,
-    marker::PhantomData,
     ptr,
     task::{Context, Poll, Waker},
 };
@@ -11,7 +10,7 @@ use embedded_io::{ErrorKind, ErrorType};
 use embedded_io_async::{Read, Write};
 
 use crate::{
-    BufferError, FlatBuffer, ReadError, ReadStatus,
+    ReadError, ReadStatus,
     const_circular_buffer::ConstCircularBuffer,
     hal::{PD4, PD7, PG0, PG3, PG4, Pin},
 };
@@ -72,7 +71,7 @@ impl Usart1ReaderHandle {
         loop {
             match self.try_read_to(term, buf).await {
                 // haven't read terminator yet, continue
-                // Ok(ReadStatus::Partial(len)) => buf = &mut buf[len..],
+                Ok(ReadStatus::Partial(len)) => buf = &mut buf[len..],
                 // anything else we out
                 result => return result,
             }
@@ -93,7 +92,7 @@ impl Usart1ReaderHandle {
             // get the reader
             let mut reader = USART1_READER.borrow(cs).borrow_mut();
             // walk the buffer
-            let result = reader.buffer.try_read_to(term, buf);
+            let result = reader.buffer.read_to(term, buf);
             // manage cts
             if UsartReader::REASSERT_THRESHOLD < reader.buffer.free_space() {
                 reader.cts.set_low();
@@ -118,8 +117,6 @@ impl Read for Usart1ReaderHandle {
         if let Err(e) = Usart1CanRead.await {
             return Err(e);
         }
-        // initialize the number of bytes read
-        let mut idx = 0;
         // go interrupt free while we poll bytes
         avr_device::interrupt::free(|cs| {
             // get the reader
