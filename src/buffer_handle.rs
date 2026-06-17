@@ -1,8 +1,44 @@
-use core::{error::Error, fmt};
+use core::{error::Error, fmt, slice};
 
 use embedded_io::ErrorKind;
 
 use crate::{BufferRequest, CircularBuffer, FlatBuffer};
+
+#[derive(Debug)]
+pub enum ReadStatus {
+    /// read completed with bytes read
+    Complete(usize),
+    /// partial read complete with bytes read
+    Partial(usize),
+    /// read complete because buffer has been filled with bytes
+    BufferFull(usize),
+}
+
+#[derive(Debug)]
+pub enum ReadError {
+    /// read called and destination buffer is empty
+    DestinationEmpty,
+    /// read called and no bytes to read from source
+    SourceEmpty,
+    /// read called and io is disconnected
+    Disconnected,
+}
+impl Error for ReadError {}
+impl embedded_io_async::Error for ReadError {
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::Other
+    }
+}
+impl fmt::Display for ReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let txt = match self {
+            ReadError::DestinationEmpty => "DestinationEmpty",
+            ReadError::SourceEmpty => "SourceEmpty",
+            ReadError::Disconnected => "Disconnected",
+        };
+        write!(f, "{}", txt)
+    }
+}
 
 #[derive(Debug)]
 pub enum BufferError {
@@ -78,6 +114,12 @@ impl From<BufferHandle> for CircularBuffer {
 impl From<BufferHandle> for FlatBuffer<'_> {
     fn from(handle: BufferHandle) -> Self {
         FlatBuffer::new(handle.ptr, handle.capacity)
+    }
+}
+
+impl From<BufferHandle> for &mut [u8] {
+    fn from(handle: BufferHandle) -> Self {
+        unsafe { slice::from_raw_parts_mut(handle.ptr, handle.capacity) }
     }
 }
 

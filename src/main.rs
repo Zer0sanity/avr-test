@@ -94,21 +94,22 @@ pub async fn usart1_reader_task(
     mut writer: Ft240xWriterHandle,
     mut led: LED,
 ) {
-    // get some buffers
-    let mut rx_buffer: FlatBuffer = BufferRequest.await.into();
-    let mut tx_buffer: FlatBuffer = BufferRequest.await.into();
-
     let _ = writer.write("uart reader starting\r\n".as_bytes()).await;
+    // get some buffers
+    let mut rx_buffer: &mut [u8] = BufferRequest.await.into();
+    let mut tx_buffer: FlatBuffer = BufferRequest.await.into();
 
     // turn off the led
     led.on();
 
     loop {
-        rx_buffer.reset();
+        // rx_buffer.reset();
         tx_buffer.reset();
 
         // preform a read
-        let packet_received = reader.read_to(0x0a, &mut rx_buffer).await;
+        let packet_received = reader.read_to(0x0a, rx_buffer).await;
+
+        led.toggle();
 
         let len = rx_buffer.len();
         // see what happened

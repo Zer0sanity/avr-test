@@ -11,7 +11,7 @@ use embedded_io::{ErrorKind, ErrorType};
 use embedded_io_async::{Read, Write};
 
 use crate::{
-    BufferError, FlatBuffer,
+    BufferError, FlatBuffer, ReadError, ReadStatus,
     const_circular_buffer::ConstCircularBuffer,
     hal::{PD4, PD7, PG0, PG3, PG4, Pin},
 };
@@ -68,57 +68,32 @@ fn USART1_RX() {
 pub struct Usart1ReaderHandle;
 
 impl Usart1ReaderHandle {
-    pub async fn read_to(&self, term: u8, buf: &mut FlatBuffer<'_>) -> Result<bool, BufferError> {
+    pub async fn read_to(&self, term: u8, mut buf: &mut [u8]) -> Result<ReadStatus, ReadError> {
         loop {
             match self.try_read_to(term, buf).await {
                 // haven't read terminator yet, continue
-                Ok(false) => continue,
+                // Ok(ReadStatus::Partial(len)) => buf = &mut buf[len..],
                 // anything else we out
-                result => break result,
+                result => return result,
             }
         }
     }
 
-    pub async fn try_read_to(
-        &self,
-        term: u8,
-        buf: &mut FlatBuffer<'_>,
-    ) -> Result<bool, BufferError> {
+    pub async fn try_read_to(&self, term: u8, buf: &mut [u8]) -> Result<ReadStatus, ReadError> {
         // did we get called with a full buffer
-        if buf.is_full() {
-            return Err(BufferError::BufferEmpty);
+        if buf.is_empty() {
+            return Err(ReadError::DestinationEmpty);
         }
         // wait until we can read
-        if let Err(kind) = Usart1CanRead.await {
-            return Err(kind.into()); //BufferError::From()BufferEmpty);
+        if let Err(e) = Usart1CanRead.await {
+            return Err(e);
         }
         // go interrupt free while we poll bytes
         avr_device::interrupt::free(|cs| {
             // get the reader
             let mut reader = USART1_READER.borrow(cs).borrow_mut();
             // walk the buffer
-            let result = loop {
-                // is the receiving buffer full
-                if buf.is_full() {
-                    break Err(BufferError::InsufficientSpace);
-                }
-                // try to read from the usart receive buffer
-                match reader.buffer.read_byte() {
-                    // we got a byte
-                    Ok(byte) => {
-                        // write it to the receive buffer, we can discard the result since we checked above
-                        _ = buf.write_byte(byte);
-                        // did we catch the terminator
-                        if byte == term {
-                            break Ok(true);
-                        }
-                    }
-                    // no byte to read in usart receive buffer
-                    Err(BufferError::BufferEmpty) => break Ok(false),
-                    // any other error we out
-                    Err(e) => break Err(e),
-                }
-            };
+            let result = reader.buffer.try_read_to(term, buf);
             // manage cts
             if UsartReader::REASSERT_THRESHOLD < reader.buffer.free_space() {
                 reader.cts.set_low();
@@ -130,43 +105,34 @@ impl Usart1ReaderHandle {
 }
 
 impl ErrorType for Usart1ReaderHandle {
-    type Error = embedded_io::ErrorKind;
+    type Error = ReadError;
 }
 
 impl Read for Usart1ReaderHandle {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         // did we get called with an empty buffer
         if buf.is_empty() {
-            return Err(ErrorKind::InvalidInput);
+            return Err(ReadError::DestinationEmpty);
         }
         // wait until we can read
-        if let Err(kind) = Usart1CanRead.await {
-            return Err(kind);
+        if let Err(e) = Usart1CanRead.await {
+            return Err(e);
         }
         // initialize the number of bytes read
-        let mut bytes = 0;
+        let mut idx = 0;
         // go interrupt free while we poll bytes
         avr_device::interrupt::free(|cs| {
             // get the reader
             let mut reader = USART1_READER.borrow(cs).borrow_mut();
-            // walk the buffer
-            for slot in buf.iter_mut() {
-                // we know we can read at least one, from the data available await above
-                if let Ok(byte) = reader.buffer.read_byte() {
-                    *slot = byte;
-                    // increment the number of bytes read
-                    bytes += 1;
-                } else {
-                    break;
-                }
-            }
+            // read what we can
+            let result = reader.buffer.read(buf);
             // manage cts
             if UsartReader::REASSERT_THRESHOLD < reader.buffer.free_space() {
                 reader.cts.set_low();
             }
-        });
-        // here we read at least one so, return the number of bytes read
-        Ok(bytes)
+            // return
+            result
+        })
     }
 }
 
@@ -174,7 +140,7 @@ impl Read for Usart1ReaderHandle {
 struct Usart1CanRead;
 
 impl Future for Usart1CanRead {
-    type Output = Result<(), embedded_io::ErrorKind>;
+    type Output = Result<(), ReadError>;
 
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // go interrupt free for the check
@@ -189,7 +155,7 @@ impl Future for Usart1CanRead {
             let control = USART1_CONTROL.borrow(cs).borrow_mut();
             // if not connected return an error
             if !control.sense.is_high() {
-                return Poll::Ready(Err(ErrorKind::NotConnected));
+                return Poll::Ready(Err(ReadError::Disconnected));
             }
             // else no data to read.  register the waker
             reader.waker = Some(cx.waker().clone());
