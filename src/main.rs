@@ -98,7 +98,7 @@ pub async fn usart1_reader_task(
     // get some buffers
     let mut rx_buffer: &mut [u8] = BufferRequest.await.into();
     let mut tx_buffer: FlatBuffer = BufferRequest.await.into();
-    let term: [u8; 1] = [0x0a];
+    let term: u8 = 0x0a;
 
     // turn off the led
     led.on();
@@ -108,13 +108,13 @@ pub async fn usart1_reader_task(
         tx_buffer.reset();
 
         // preform a read
-        let packet_received = reader.read_to(&term, rx_buffer).await;
+        let packet_received = reader.read_to(term, rx_buffer).await;
 
         // see what happened
         match packet_received {
             Ok(ReadStatus::Complete(len)) => {
                 let _ = tx_buffer.write_str("Complete: ");
-                let _ = tx_buffer.write_all(&rx_buffer[..len - term.len()]);
+                let _ = tx_buffer.write_all(&rx_buffer[..len - 1]);
                 let _ = tx_buffer.write_str(" bytes: ");
                 let _ = tx_buffer.write_byte(len as u8 + 0x30);
                 let _ = tx_buffer.write_str("\r\n");
@@ -225,6 +225,60 @@ pub async fn ft240_reader_task(
 //         let _ = writer.write_all(tx_buffer).await;
 //         // blink the led on
 //         led.on();
+//     }
+// }
+
+// somthing like this for multi byte terminators
+
+// let mut total_len = 0;
+// let mut saw_carriage_return = false;
+
+// loop {
+//     // Read whatever bytes have arrived into our staging slice
+//     // This invokes your fast, division-free block reader
+//     if let Ok(bytes_read) = reader.read(&mut rx_buffer[total_len..]).await {
+//         if bytes_read == 0 {
+//             yield_now().await;
+//             continue;
+//         }
+
+//         let scan_start = total_len;
+//         total_len += bytes_read;
+
+//         // Scan only the newly appended bytes for our sequence
+//         for i in scan_start..total_len {
+//             let current_byte = rx_buffer[i];
+
+//             if saw_carriage_return && current_byte == b'\n' {
+//                 // ?? MATCH FOUND! We found \r\n across stream boundaries.
+//                 tx_buffer.reset();
+//                 let _ = tx_buffer.write_str("Complete Line: ");
+//                 // Slice up to the '\r' (i - 1)
+//                 let _ = tx_buffer.write_all(&rx_buffer[..i - 1]);
+//                 let _ = writer.write(tx_buffer.as_ref()).await;
+
+//                 // Clean up our staging buffer for the next line
+//                 let remaining = total_len - (i + 1);
+//                 if remaining > 0 {
+//                     // Shift leftover bytes to the front of the array
+//                     rx_buffer.copy_within(i + 1..total_len, 0);
+//                     total_len = remaining;
+//                 } else {
+//                     total_len = 0;
+//                 }
+//                 saw_carriage_return = false;
+//                 break; // Break the scanner loop to process the new state
+//             }
+
+//             // Track the state for the next character evaluation
+//             saw_carriage_return = current_byte == b'\r';
+//         }
+
+//         // Optional guard: prevent a malformed line from overflowing rx_buffer
+//         if total_len >= rx_buffer.len() {
+//             total_len = 0; // Flush or handle buffer full error
+//             saw_carriage_return = false;
+//         }
 //     }
 // }
 
