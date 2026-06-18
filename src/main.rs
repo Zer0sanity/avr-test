@@ -98,6 +98,7 @@ pub async fn usart1_reader_task(
     // get some buffers
     let mut rx_buffer: &mut [u8] = BufferRequest.await.into();
     let mut tx_buffer: FlatBuffer = BufferRequest.await.into();
+    let term: [u8; 1] = [0x0a];
 
     // turn off the led
     led.on();
@@ -107,14 +108,13 @@ pub async fn usart1_reader_task(
         tx_buffer.reset();
 
         // preform a read
-        let packet_received = reader.read_to(0x0a, rx_buffer).await;
+        let packet_received = reader.read_to(&term, rx_buffer).await;
 
         // see what happened
         match packet_received {
             Ok(ReadStatus::Complete(len)) => {
                 let _ = tx_buffer.write_str("Complete: ");
-                // let _ = tx_buffer.write_all(&rx_buffer[..len - 1]);
-                let _ = tx_buffer.write_all(&rx_buffer[0..5]);
+                let _ = tx_buffer.write_all(&rx_buffer[..len - term.len()]);
                 let _ = tx_buffer.write_str(" bytes: ");
                 let _ = tx_buffer.write_byte(len as u8 + 0x30);
                 let _ = tx_buffer.write_str("\r\n");
@@ -140,7 +140,7 @@ pub async fn usart1_reader_task(
         // write it
         let _ = writer.write(tx_buffer.as_ref()).await;
         // blink the led on
-        // led.toggle();
+        led.toggle();
     }
 }
 
@@ -164,27 +164,27 @@ pub async fn ft240_reader_task(
 
         let mut rx_slice = rx_buffer.as_mut();
         let packet_received = reader.read(&mut rx_slice).await;
-        // // get the buffer as a mutable slice
-        // // let rx_buffer1 = rx_buffer.as_mut();
-        // // preform a read
-        // // let mut fuck: [u8; 30] = [0; 30];
-        // // let rx_result = reader.read(&mut fuck).await;
-        // // see what happened
-        // led.toggle();
-        // match packet_received {
-        //     Ok(len) => {
-        //         let _ = tx_buffer.write_all(&rx_slice[..len]);
-        //         let _ = tx_buffer.write_str(" bytes: ");
-        //         let _ = tx_buffer.write_byte(len as u8 + 0x30);
-        //         let _ = tx_buffer.write_str("\r\n");
-        //     }
-        //     Err(_) => {
-        //         // _ = write!(tx_buffer, "error: {} \r\n", e);
-        //     }
-        // };
+        // get the buffer as a mutable slice
+        // let rx_buffer1 = rx_buffer.as_mut();
+        // preform a read
+        // let mut fuck: [u8; 30] = [0; 30];
+        // let rx_result = reader.read(&mut fuck).await;
+        // see what happened
+        led.toggle();
+        match packet_received {
+            Ok(len) => {
+                let _ = tx_buffer.write_all(&rx_slice[..len]);
+                let _ = tx_buffer.write_str(" bytes: ");
+                let _ = tx_buffer.write_byte(len as u8 + 0x30);
+                let _ = tx_buffer.write_str("\r\n");
+            }
+            Err(_) => {
+                // _ = write!(tx_buffer, "error: {} \r\n", e);
+            }
+        };
         // write it
-        // let _ = writer.write(tx_buffer.as_ref()).await;
-        // let _ = writer.flush().await;
+        let _ = writer.write(tx_buffer.as_ref()).await;
+        let _ = writer.flush().await;
 
         Timer::delay(1000).await;
         // blink the led on

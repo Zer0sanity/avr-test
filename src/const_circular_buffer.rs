@@ -121,7 +121,7 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
     }
 
     #[inline(always)]
-    pub fn read_to(&mut self, term: u8, dest: &mut [u8]) -> Result<ReadStatus, ReadError> {
+    pub fn read_to(&mut self, term: &[u8], dest: &mut [u8]) -> Result<ReadStatus, ReadError> {
         // is the destination empty
         if dest.is_empty() {
             return Err(ReadError::DestinationEmpty);
@@ -140,7 +140,7 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
             // one slice from the read position to the read position + allowed length
             (
                 &self.buf[self.r_pos..self.r_pos + len_allowed],
-                &self.buf[..],
+                &self.buf[0..0],
             )
         } else {
             // allowed length is greater then the length to the end of the buffer.  we need to split
@@ -152,16 +152,38 @@ impl<const CAPACITY: usize> ConstCircularBuffer<CAPACITY> {
             )
         };
         // try to find the terminator from what we can read
-        let (term_found, len) = if let Some(pos) = first_half.iter().position(|&b| b == term) {
-            // found in the first half
-            (true, pos + 1)
-        } else if let Some(pos) = second_half.iter().position(|&b| b == term) {
-            // found in the second half
-            (true, first_half.len() + pos + 1)
-        } else {
-            // not found, read all we can
-            (false, len_allowed)
-        };
+        let mut len = 0;
+        let mut term_match_idx = 0;
+        let mut term_found = false;
+        // chain the first and second halves
+        for &byte in first_half.iter().chain(second_half.iter()) {
+            // increment the length
+            len += 1;
+            // loop and try to find the terminator
+            loop {
+                // does the current byte match
+                if byte == term[term_match_idx] {
+                    // yes, increment the match index
+                    term_match_idx += 1;
+                    // is the terminator found
+                    if term_match_idx == term.len() {
+                        term_found = true;
+                    }
+                    // break the loop to either look at the next byte or exit if term was found
+                    break;
+                } else if term_match_idx > 0 {
+                    // reset the terminator match index
+                    term_match_idx = 0;
+                } else {
+                    // no match break
+                    break;
+                }
+            }
+
+            if term_found {
+                break;
+            }
+        }
         // figure out if we can copy the whole thing or just to the end of the buffer
         let first_copy_len = min(len, len_to_end);
         // pointer stuff is unsafe and is being used as an optimization for block copying

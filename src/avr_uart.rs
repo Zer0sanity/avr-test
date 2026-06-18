@@ -67,7 +67,7 @@ fn USART1_RX() {
 pub struct Usart1ReaderHandle;
 
 impl Usart1ReaderHandle {
-    pub async fn read_to(&self, term: u8, mut buf: &mut [u8]) -> Result<ReadStatus, ReadError> {
+    pub async fn read_to(&self, term: &[u8], buf: &mut [u8]) -> Result<ReadStatus, ReadError> {
         let mut total_len = 0;
         let status = loop {
             match self.try_read_to(term, &mut buf[total_len..]).await? {
@@ -86,7 +86,7 @@ impl Usart1ReaderHandle {
         Ok(status)
     }
 
-    pub async fn try_read_to(&self, term: u8, buf: &mut [u8]) -> Result<ReadStatus, ReadError> {
+    pub async fn try_read_to(&self, term: &[u8], buf: &mut [u8]) -> Result<ReadStatus, ReadError> {
         // did we get called with a full buffer
         if buf.is_empty() {
             return Err(ReadError::DestinationEmpty);
