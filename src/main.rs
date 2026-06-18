@@ -109,25 +109,38 @@ pub async fn usart1_reader_task(
         // preform a read
         let packet_received = reader.read_to(0x0a, rx_buffer).await;
 
-        led.toggle();
-
-        let len = rx_buffer.len();
         // see what happened
         match packet_received {
-            Ok(_) => {
-                let _ = tx_buffer.write_all(&rx_buffer.as_ref()[..rx_buffer.len() - 1]);
+            Ok(ReadStatus::Complete(len)) => {
+                let _ = tx_buffer.write_str("Complete: ");
+                // let _ = tx_buffer.write_all(&rx_buffer[..len - 1]);
+                let _ = tx_buffer.write_all(&rx_buffer[0..5]);
+                let _ = tx_buffer.write_str(" bytes: ");
+                let _ = tx_buffer.write_byte(len as u8 + 0x30);
+                let _ = tx_buffer.write_str("\r\n");
+            }
+            Ok(ReadStatus::Partial(len)) => {
+                let _ = tx_buffer.write_str("Partial: ");
+                let _ = tx_buffer.write_all(&rx_buffer[..len - 1]);
+                let _ = tx_buffer.write_str(" bytes: ");
+                let _ = tx_buffer.write_byte(len as u8 + 0x30);
+                let _ = tx_buffer.write_str("\r\n");
+            }
+            Ok(ReadStatus::BufferFull(len)) => {
+                let _ = tx_buffer.write_str("BufferFull: ");
+                let _ = tx_buffer.write_all(&rx_buffer[..len - 1]);
                 let _ = tx_buffer.write_str(" bytes: ");
                 let _ = tx_buffer.write_byte(len as u8 + 0x30);
                 let _ = tx_buffer.write_str("\r\n");
             }
             Err(e) => {
-                // _ = write!(tx_buffer, "error: {} \r\n", e);
+                let _ = tx_buffer.write_str("Error: ");
             }
         };
         // write it
         let _ = writer.write(tx_buffer.as_ref()).await;
         // blink the led on
-        led.toggle();
+        // led.toggle();
     }
 }
 
@@ -150,7 +163,7 @@ pub async fn ft240_reader_task(
         // let packet_received = reader.read_to(0x0a, &mut rx_buffer).await;
 
         let mut rx_slice = rx_buffer.as_mut();
-        // let packet_received = reader.read(&mut rx_slice).await;
+        let packet_received = reader.read(&mut rx_slice).await;
         // // get the buffer as a mutable slice
         // // let rx_buffer1 = rx_buffer.as_mut();
         // // preform a read

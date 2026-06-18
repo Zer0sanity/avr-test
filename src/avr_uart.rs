@@ -68,14 +68,22 @@ pub struct Usart1ReaderHandle;
 
 impl Usart1ReaderHandle {
     pub async fn read_to(&self, term: u8, mut buf: &mut [u8]) -> Result<ReadStatus, ReadError> {
-        loop {
-            match self.try_read_to(term, buf).await {
-                // haven't read terminator yet, continue
-                Ok(ReadStatus::Partial(len)) => buf = &mut buf[len..],
-                // anything else we out
-                result => return result,
+        let mut total_len = 0;
+        let status = loop {
+            match self.try_read_to(term, &mut buf[total_len..]).await? {
+                // haven't read terminator yet, update length and continue
+                ReadStatus::Partial(len) => total_len += len,
+                ReadStatus::Complete(len) => {
+                    total_len += len;
+                    break ReadStatus::Complete(total_len);
+                }
+                ReadStatus::BufferFull(len) => {
+                    total_len += len;
+                    break ReadStatus::BufferFull(total_len);
+                }
             }
-        }
+        };
+        Ok(status)
     }
 
     pub async fn try_read_to(&self, term: u8, buf: &mut [u8]) -> Result<ReadStatus, ReadError> {
@@ -149,11 +157,11 @@ impl Future for Usart1CanRead {
                 return Poll::Ready(Ok(()));
             }
             // check if we are connected
-            let control = USART1_CONTROL.borrow(cs).borrow_mut();
+            // let control = USART1_CONTROL.borrow(cs).borrow_mut();
             // if not connected return an error
-            if !control.sense.is_high() {
-                return Poll::Ready(Err(ReadError::Disconnected));
-            }
+            // if !control.sense.is_high() {
+            //     return Poll::Ready(Err(ReadError::Disconnected));
+            // }
             // else no data to read.  register the waker
             reader.waker = Some(cx.waker().clone());
             // return pending
@@ -289,12 +297,12 @@ impl Future for Usart1CanWrite {
             if !writer.buffer.is_full() {
                 return Poll::Ready(Ok(()));
             }
-            // check if we are connected
-            let control = USART1_CONTROL.borrow(cs).borrow_mut();
-            // if not connected return an error
-            if !control.sense.is_high() {
-                return Poll::Ready(Err(ErrorKind::NotConnected));
-            }
+            // // check if we are connected
+            // let control = USART1_CONTROL.borrow(cs).borrow_mut();
+            // // if not connected return an error
+            // if !control.sense.is_high() {
+            //     return Poll::Ready(Err(ErrorKind::NotConnected));
+            // }
             // else no space available to write.  register the waker
             writer.waker_opt = Some(cx.waker().clone());
             // return pending
@@ -317,12 +325,12 @@ impl Future for Usart1TxBufferEmpty {
             if writer.buffer.is_empty() {
                 return Poll::Ready(Ok(()));
             }
-            // check if we are connected
-            let control = USART1_CONTROL.borrow(cs).borrow_mut();
-            // if not connected return an error
-            if !control.sense.is_high() {
-                return Poll::Ready(Err(ErrorKind::NotConnected));
-            }
+            // // check if we are connected
+            // let control = USART1_CONTROL.borrow(cs).borrow_mut();
+            // // if not connected return an error
+            // if !control.sense.is_high() {
+            //     return Poll::Ready(Err(ErrorKind::NotConnected));
+            // }
             // else no space available to write.  register the waker
             writer.waker_opt = Some(cx.waker().clone());
             // return pending
