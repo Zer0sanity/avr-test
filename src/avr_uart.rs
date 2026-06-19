@@ -10,7 +10,7 @@ use embedded_io::{ErrorKind, ErrorType};
 use embedded_io_async::{Read, Write};
 
 use crate::{
-    ReadError, ReadStatus,
+    ReadError, ReadStatus, WriteError,
     const_circular_buffer::ConstCircularBuffer,
     hal::{PD4, PD7, PG0, PG3, PG4, Pin},
 };
@@ -193,10 +193,25 @@ impl UsartWriter<USART1, PG4, BUFFER_CAPACITY> {
             }
         }
     }
+
+    pub fn start_tx_if_needed(&mut self) {
+        if self.tx_idle && !self.buffer.is_empty() {
+            if let Ok(byte) = self.buffer.read_byte() {
+                self.usart.udr1().write(|w| unsafe { w.bits(byte) });
+                self.usart.ucsr1b().modify(|_, w| w.udrie1().set_bit());
+                self.tx_idle = false;
+            }
+        }
+    }
+
+    fn send_byte(&mut self, byte: u8) {
+        while self.usart.ucsr1a().read().udre1().bit_is_clear() {}
+        self.usart.udr1().write(|w| unsafe { w.bits(byte) });
+    }
 }
 
 #[avr_device::interrupt(at90can128)]
-fn USART1_TX() {
+fn USART1_UDRE() {
     // forge a token. this is safe ONLY because we are in an ISR
     let cs = unsafe { avr_device::interrupt::CriticalSection::new() };
     // get the writer
@@ -204,7 +219,8 @@ fn USART1_TX() {
     // check if we can send
     let rts_ok = writer.rts.is_low();
     // if we can send try to read a byte from writer
-    if rts_ok && let Ok(byte) = writer.buffer.read_byte() {
+    // if rts_ok && let Ok(byte) = writer.buffer.read_byte() {
+    if let Ok(byte) = writer.buffer.read_byte() {
         // write it to the hardware
         writer.usart.udr1().write(|w| unsafe { w.bits(byte) });
     } else {
@@ -222,45 +238,39 @@ fn USART1_TX() {
 // usart1 handle we can give out to operate on the static shared usart1 writer
 pub struct Usart1WriterHandle;
 impl ErrorType for Usart1WriterHandle {
-    type Error = embedded_io::ErrorKind;
+    type Error = WriteError;
 }
 
 impl Write for Usart1WriterHandle {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         // did we get called with a empty buffer
         if buf.is_empty() {
-            return Err(ErrorKind::InvalidInput);
+            return Err(WriteError::SourceEmpty);
         }
         // wait until we can write
-        if let Err(kind) = Usart1CanWrite.await {
-            return Err(kind);
-        }
+        Usart1CanWrite.await?;
         // go interrupt free while we write bytes
-        let write_result = avr_device::interrupt::free(|cs| {
+        avr_device::interrupt::free(|cs| {
             // get the writer
             let mut writer = USART1_WRITER.borrow(cs).borrow_mut();
-            // write the data
-            let write_result = writer.buffer.write(buf);
-            // see if we need to enable interrupts
-            if writer.tx_idle {
-                // enable interrupts
-                writer.usart.ucsr1b().write(|w| w.udrie1().set_bit());
-                // clear the tx_idle flag
-                writer.tx_idle = false;
+
+            for &byte in buf {
+                writer.send_byte(byte);
             }
-            // return the write result
-            write_result
-        });
-        // map the error
-        write_result.map_err(|e| e.into())
+
+            // // write the data
+            // let write_result = writer.buffer.write(buf);
+            // // see if we need to enable interrupts
+            // writer.start_tx_if_needed();
+            // // return the write result
+            // write_result
+            Ok(buf.len())
+        })
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        // going to need another future to wait until the buffer is empty.
         // wait until we can write
-        if let Err(kind) = Usart1CanWrite.await {
-            return Err(kind);
-        }
+        Usart1CanWrite.await?;
         // go interrupt free while we write the flush character
         avr_device::interrupt::free(|cs| {
             // get the writer
@@ -270,12 +280,7 @@ impl Write for Usart1WriterHandle {
                 .flush_char_opt
                 .map(|flush_char| writer.buffer.write_byte(flush_char));
             // see if we need to enable interrupts
-            if writer.tx_idle {
-                // enable interrupts
-                writer.usart.ucsr1b().write(|w| w.udrie1().set_bit());
-                // clear the tx_idle flag
-                writer.tx_idle = false;
-            }
+            writer.start_tx_if_needed();
         });
         // wait until the buffer is empty
         return Usart1TxBufferEmpty.await;
@@ -286,7 +291,7 @@ impl Write for Usart1WriterHandle {
 struct Usart1CanWrite;
 
 impl Future for Usart1CanWrite {
-    type Output = Result<(), embedded_io::ErrorKind>;
+    type Output = Result<(), WriteError>;
 
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // go interrupt free for the check
@@ -297,6 +302,9 @@ impl Future for Usart1CanWrite {
             if !writer.buffer.is_full() {
                 return Poll::Ready(Ok(()));
             }
+            // see if we need to enable interrupts
+            writer.start_tx_if_needed();
+
             // // check if we are connected
             // let control = USART1_CONTROL.borrow(cs).borrow_mut();
             // // if not connected return an error
@@ -314,7 +322,7 @@ impl Future for Usart1CanWrite {
 struct Usart1TxBufferEmpty;
 
 impl Future for Usart1TxBufferEmpty {
-    type Output = Result<(), embedded_io::ErrorKind>;
+    type Output = Result<(), WriteError>;
 
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // go interrupt free for the check
@@ -325,6 +333,9 @@ impl Future for Usart1TxBufferEmpty {
             if writer.buffer.is_empty() {
                 return Poll::Ready(Ok(()));
             }
+            // see if we need to enable interrupts
+            writer.start_tx_if_needed();
+
             // // check if we are connected
             // let control = USART1_CONTROL.borrow(cs).borrow_mut();
             // // if not connected return an error

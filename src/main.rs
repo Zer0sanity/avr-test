@@ -52,6 +52,8 @@ fn main() -> ! {
 
     // network uart (maybe make these more generic and just pass downgraded inputs/outputs and let driver configure)
     // also the sense/reset/defaults are specific to xpico so maybe don't include in uart
+    let rx = pins.pd2.into_floating_input();
+    let tx = pins.pd3.into_output();
     let cts = pins.pg3.into_output();
     let rts = pins.pg4.into_floating_input();
     let sense = pins.pd7.into_pull_up_input();
@@ -104,7 +106,6 @@ pub async fn usart1_reader_task(
     led.on();
 
     loop {
-        // rx_buffer.reset();
         tx_buffer.reset();
 
         // preform a read
@@ -150,30 +151,24 @@ pub async fn ft240_reader_task(
     mut led: LED,
 ) {
     // get some buffers
-    let mut rx_buffer: FlatBuffer = BufferRequest.await.into();
+    let mut rx_buffer: &mut [u8] = BufferRequest.await.into();
     let mut tx_buffer: FlatBuffer = BufferRequest.await.into();
     // turn off the led
     led.on();
 
+    let _ = writer.write("usb reader starting\r\n".as_bytes()).await;
+    Timer::delay(1000).await;
     loop {
-        rx_buffer.reset();
-        // tx_buffer.reset();
+        tx_buffer.reset();
 
         // // preform a read
         // let packet_received = reader.read_to(0x0a, &mut rx_buffer).await;
 
-        let mut rx_slice = rx_buffer.as_mut();
-        let packet_received = reader.read(&mut rx_slice).await;
-        // get the buffer as a mutable slice
-        // let rx_buffer1 = rx_buffer.as_mut();
-        // preform a read
-        // let mut fuck: [u8; 30] = [0; 30];
-        // let rx_result = reader.read(&mut fuck).await;
-        // see what happened
-        led.toggle();
+        let packet_received = reader.read(rx_buffer).await;
+
         match packet_received {
             Ok(len) => {
-                let _ = tx_buffer.write_all(&rx_slice[..len]);
+                let _ = tx_buffer.write_all(&rx_buffer[..len]);
                 let _ = tx_buffer.write_str(" bytes: ");
                 let _ = tx_buffer.write_byte(len as u8 + 0x30);
                 let _ = tx_buffer.write_str("\r\n");
@@ -183,10 +178,11 @@ pub async fn ft240_reader_task(
             }
         };
         // write it
-        let _ = writer.write(tx_buffer.as_ref()).await;
-        let _ = writer.flush().await;
+        led.toggle();
 
-        Timer::delay(1000).await;
+        let _ = writer.write(tx_buffer.as_ref()).await;
+        // let _ = writer.flush().await;
+
         // blink the led on
         led.toggle();
     }

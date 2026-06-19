@@ -41,6 +41,41 @@ impl fmt::Display for ReadError {
 }
 
 #[derive(Debug)]
+pub enum WriteError {
+    /// write called and destination buffer is full
+    DestinationFull,
+    /// write called and no bytes to read from source
+    SourceEmpty,
+    /// write called but source can't completely fit in destination
+    InsufficientSpace,
+    /// write called and io is disconnected
+    Disconnected,
+}
+impl Error for WriteError {}
+impl embedded_io_async::Error for WriteError {
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::Other
+    }
+}
+impl fmt::Display for WriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let txt = match self {
+            WriteError::DestinationFull => "DestinationEmpty",
+            WriteError::SourceEmpty => "SourceEmpty",
+            WriteError::InsufficientSpace => "InsufficientSpace",
+            WriteError::Disconnected => "Disconnected",
+        };
+        write!(f, "{}", txt)
+    }
+}
+
+impl From<WriteError> for fmt::Error {
+    fn from(_err: WriteError) -> Self {
+        fmt::Error
+    }
+}
+
+#[derive(Debug)]
 pub enum BufferError {
     BufferEmpty,
     InsufficientSpace,
